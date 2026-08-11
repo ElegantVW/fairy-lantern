@@ -1,0 +1,8 @@
+# Fairy Lantern (GBA) — never commit carts/saves
+*.gba
+*.sav
+roms/*
+!roms/.gitkeep
+
+# rust build
+target/
