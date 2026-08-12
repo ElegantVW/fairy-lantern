@@ -4,7 +4,7 @@ use crate::battery::{self, EepromChip, FlashChip, SaveType};
 use crate::cart::Cart;
 use crate::dma::DmaController;
 use crate::rtc::Rtc;
-use crate::sound::Sound;
+use crate::sound::{bios::SoundDriver, Sound};
 use crate::timers::Timers;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -53,6 +53,7 @@ pub struct Bus {
     pub irq_count: u64,
     pub dma: DmaController,
     pub sound: Sound,
+    pub sound_driver: SoundDriver,
     /// Temporary DMA trace event counter (FAIRY_DMA_TRACE=1).
     pub dbg_evt: u64,
     /// Temporary: last CPU PC (set each step; printed in DMA trace).
@@ -103,6 +104,7 @@ impl Bus {
             irq_count: 0,
             dma: DmaController::new(),
             sound: Sound::new(),
+            sound_driver: SoundDriver::new(),
             dbg_evt: 0,
             dbg_pc: 0,
             rtc: Rtc::new(Rtc::detect(&cart.data)),
@@ -776,6 +778,7 @@ impl Bus {
             sndl: self.read16(0x0400_0080),
             sndh: self.read16(0x0400_0082),
             sndx: self.read16(0x0400_0084),
+            bias: self.read16(0x0400_0088),
             ch1_l: self.read16(0x0400_0060),
             ch1_h: self.read16(0x0400_0062),
             ch1_x: self.read16(0x0400_0064),

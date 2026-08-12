@@ -159,14 +159,32 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             .update_with_buffer(&fb, ppu::WIDTH, ppu::HEIGHT)
             .map_err(|e| anyhow::anyhow!("present: {e}"))?;
 
-        // Pace to GBA frame clock
+        // Pace to GBA frame clock, with light audio water-marks so the host
+        // ring neither starves nor grows without bound under load.
         next_frame += frame_budget;
         let now = Instant::now();
-        if next_frame > now {
-            std::thread::sleep(next_frame - now);
-        } else {
-            // fell behind — resync
+        let ring = emu.bus.sound.ring_len();
+        // Watermarks in ms; low ≈ 80 ms, high ≈ 200 ms (BT-friendly).
+        let rate = emu.bus.sound.stream_rate.max(8000) as usize;
+        let ring_low = rate.saturating_mul(80) / 1000;
+        let ring_high = rate.saturating_mul(200) / 1000;
+        if ring < ring_low {
+            // Behind on audio — skip sleep this frame to refill.
             next_frame = now;
+        } else if next_frame > now {
+            let mut wait = next_frame - now;
+            if ring > ring_high {
+                // Ahead on audio — allow a little extra sleep (cap +4 ms).
+                wait += Duration::from_millis(4);
+            }
+            std::thread::sleep(wait);
+        } else {
+            // Fell behind video — resync, but don't hard-reset every frame if
+            // only slightly late (keeps audio feed smoother).
+            let late = now - next_frame;
+            if late > frame_budget * 3 {
+                next_frame = now;
+            }
         }
     }
 

@@ -65,22 +65,24 @@ fn dispatch(cpu: &mut Cpu, bus: &mut Bus, num: u8) {
         0x17 => diff8_unfilter(cpu, bus, true),
         0x18 => diff16_unfilter(cpu, bus),
         0x19 => {
-            // SoundBias — r0 = level (0 or 1); write SOUNDCNT bias reg
-            let level = if cpu.r[0] != 0 { 0x200u16 } else { 0 };
-            bus.write16_raw(0x0400_0088, level);
+            crate::sound::bios::sound_bias(bus, cpu.r[0]);
         }
-        // m4a / SoundDriver family — silent success so music systems proceed
-        0x1A..=0x2A => {
-            sound_driver_nop(cpu, num);
-        }
-        0x2B => {
-            // MidiKey2Freq rough: r0=wave, r1=key, r2=fine → r0=freq
-            // f = 440 * 2^((key-69)/12) scaled; games tolerate approximation
-            let key = cpu.r[1] as f64;
-            let fine = (cpu.r[2] as i32) as f64 / 256.0;
-            let freq = 440.0 * 2f64.powf((key + fine - 69.0) / 12.0);
-            cpu.r[0] = freq as u32;
-        }
+        // m4a / SoundDriver + MusicPlayer SWIs (0x1A–0x2B)
+        0x1A => crate::sound::bios::sound_driver_init(cpu, bus),
+        0x1B => crate::sound::bios::sound_driver_mode(bus, cpu.r[0]),
+        0x1C => crate::sound::bios::sound_driver_main(bus),
+        0x1D => crate::sound::bios::sound_driver_vsync(bus),
+        0x1E => crate::sound::bios::sound_channel_clear(bus),
+        0x1F => crate::sound::bios::midi_key_freq(cpu, bus),
+        0x20 => crate::sound::bios::music_player_open(bus),
+        0x21 => crate::sound::bios::music_player_start(bus),
+        0x22 => crate::sound::bios::music_player_stop(bus),
+        0x23 => crate::sound::bios::music_player_continue(bus),
+        0x24 => crate::sound::bios::music_player_fade_out(bus),
+        0x28 => crate::sound::bios::sound_driver_vsync(bus),
+        0x29 => crate::sound::bios::sound_driver_vsync(bus),
+        0x2A => crate::sound::bios::sound_get_jump_list(cpu),
+        0x2B => crate::sound::bios::midi_key_freq(cpu, bus),
         _ => {
             bus.swi_unknown = bus.swi_unknown.wrapping_add(1);
             bus.last_swi_unknown = num;
@@ -548,27 +550,7 @@ fn clamp_s16(v: f64) -> i32 {
     v.round().clamp(-32768.0, 32767.0) as i32
 }
 
-/// Sound driver SWIs used by m4a — accept and return success without audio.
-fn sound_driver_nop(cpu: &mut Cpu, num: u8) {
-    match num {
-        0x1C => {
-            // SoundDriverMain — no-op
-        }
-        0x1F => {
-            // SoundChannelClear
-        }
-        0x28 => {
-            // SoundDriverVSyncOff
-        }
-        0x29 => {
-            // SoundDriverVSyncOn
-        }
-        _ => {
-            // SoundDriverInit / Mode / etc. — leave regs alone
-            let _ = cpu;
-        }
-    }
-}
+// Sound driver SWIs are now implemented in src/sound/bios.rs
 
 /// SWI 0x10 BitUnPack — expand packed source bits into dest units.
 /// r0=src, r1=dest, r2=ptr to {u16 src_len, u8 src_width, u8 dest_width, u32 data_offset}

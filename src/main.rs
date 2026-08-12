@@ -271,12 +271,13 @@ fn run_rom(
         emu.bus.sound.samples_out,
     );
     println!(
-        "  audio_dbg: peak={} from_fifo={} from_psg={} fifoA={} fifoB={} rate={}Hz out={}",
+        "  audio_dbg: peak={} from_fifo={} from_psg={} fifoA={} fifoB={} game_rate={}Hz mix_rate={}Hz out={}",
         emu.bus.sound.peak_abs(),
         emu.bus.sound.samples_from_fifo,
         emu.bus.sound.samples_from_psg(),
         emu.bus.sound.fifo_a_len(),
         emu.bus.sound.fifo_b_len(),
+        emu.bus.sound.stream_rate,
         emu.bus.sound.stream_rate,
         emu.bus.sound.samples_out,
     );
@@ -305,6 +306,18 @@ fn run_rom(
     let rl_v = emu.bus.swi_counts[0x15];
     if lz_w | lz_v | rl_w | rl_v != 0 {
         println!("  swi: LZ77W={lz_w} LZ77V={lz_v} RLW={rl_w} RLV={rl_v}");
+    }
+    // Sound BIOS SWI calls
+    let init_c = emu.bus.swi_counts[0x1A];
+    let main_c = emu.bus.swi_counts[0x1C];
+    let vsync_c = emu.bus.swi_counts[0x1D];
+    let mkf_c = emu.bus.swi_counts[0x1F] + emu.bus.swi_counts[0x2B];
+    let music_c = emu.bus.swi_counts[0x20] + emu.bus.swi_counts[0x21] + emu.bus.swi_counts[0x22] + emu.bus.swi_counts[0x23] + emu.bus.swi_counts[0x24];
+    if init_c | main_c | vsync_c | mkf_c | music_c != 0 {
+        println!("  swi_sound: Init={init_c} Mode={m} Main={main_c} VSync={vsync_c} Clear={c} Midi2Freq={mkf_c} Music={music_c}",
+            m=emu.bus.swi_counts[0x1B],
+            c=emu.bus.swi_counts[0x1E],
+        );
     }
     if std::env::var_os("FAIRY_DEBUG").is_some() {
         let b = &emu.bus;

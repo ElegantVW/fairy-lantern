@@ -287,13 +287,52 @@ impl AutoInput {
 }
 
 fn load_bios(bios_path: Option<&Path>) -> Option<Vec<u8>> {
-    if let Some(p) = bios_path {
-        return std::fs::read(p).ok();
-    }
-    if let Ok(p) = std::env::var("FAIRY_LANTERN_BIOS") {
-        let p = Path::new(&p);
-        if p.is_file() {
-            return std::fs::read(p).ok();
+    let candidates: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        if let Some(p) = bios_path {
+            v.push(p.into());
+        }
+        if let Ok(s) = std::env::var("FAIRY_LANTERN_BIOS") {
+            v.push(PathBuf::from(s));
+        }
+        // Default paths (user-supplied only — no GBA BIOS ships with the emulator).
+        if let Ok(home) = std::env::var("HOME") {
+            v.push(PathBuf::from(format!(
+                "{home}/.local/share/faeos/fairy-lantern/bios.bin"
+            )));
+        }
+        v.push(PathBuf::from("./bios.bin"));
+        v
+    };
+    for p in &candidates {
+        if !p.is_file() {
+            continue;
+        }
+        match std::fs::read(p) {
+            Ok(data) => {
+                if data.len() != 0x4000 {
+                    eprintln!(
+                        "fairy: ignoring bios {} (size={} bytes, expected 16384)",
+                        p.display(),
+                        data.len()
+                    );
+                    continue;
+                }
+                let sum = data.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+                // Known GBA BIOS checksum is 0xBAAE1880 — warn on mismatch.
+                if sum != 0x80 {
+                    eprintln!(
+                        "fairy: bios checksum {:02X} (expected 80) — file may be corrupted",
+                        sum
+                    );
+                } else {
+                    eprintln!("fairy: using bios {}", p.display());
+                }
+                return Some(data);
+            }
+            Err(e) => {
+                eprintln!("fairy: cannot read bios {}: {e}", p.display());
+            }
         }
     }
     None
