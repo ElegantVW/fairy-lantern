@@ -1,13 +1,13 @@
 //! Host audio: pipe raw game-rate samples to aplay / pw-cat.
 //! Device resamples to output rate natively. No internal resampler, no fpos.
 
-use super::resample::SampleRing;
+use super::resample::{SampleRing, RING_CAP};
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-pub const SLEEP_MS: u64 = 5;
+pub const SLEEP_MS: u64 = 1;
 
 pub struct HostAudio {
     join: Option<JoinHandle<()>>,
@@ -180,21 +180,37 @@ fn host_pipe_loop(
             eprintln!("  audio: host open @ {want} Hz (game rate direct)");
         }
 
-        // Prime ~80 ms of game audio before first write.
+        // Prime ~120 ms of game audio before first write.
         if !primed {
-            let need = (want as usize * 80 / 1000).max(512);
-            if ring.len() < need {
-                thread::sleep(std::time::Duration::from_millis(2));
+            let need = (want as usize * 120 / 1000).max(512);
+            if ring.available() < need {
+                thread::sleep(std::time::Duration::from_millis(1));
                 continue;
             }
             primed = true;
         }
 
-        // Drain everything available from the ring (up to 4 KiB).
-        let take = 2048usize.min(ring.len());
+        // Adaptive drain: pull what's available (up to ~50ms worth).
+        let max_take = (want as usize * 50 / 1000).max(256);
+        let available = ring.available();
+        let take = max_take.min(available);
+
         if take == 0 {
-            thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+            // Ring empty — feed silence to keep pipe alive, prevent looping
+            let silence = vec![0u8; 512];
+            if let Some(ref mut sin) = stdin {
+                let _ = sin.write_all(&silence);
+                let _ = sin.flush();
+            }
+            thread::sleep(std::time::Duration::from_millis(2));
             continue;
+        }
+
+        // Sleep proportional to ring fill: more data → slightly longer sleep
+        let fill_pct = available as f32 / (RING_CAP as f32).max(1.0);
+        let sleep_ms = if fill_pct > 0.5 { 3 } else if fill_pct > 0.2 { 1 } else { 0 };
+        if sleep_ms > 0 {
+            thread::sleep(std::time::Duration::from_millis(sleep_ms));
         }
 
         buf_bytes.clear();

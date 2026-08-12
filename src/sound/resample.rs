@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-/// Live host ring capacity in mono i16 samples (~150 ms @ 48 kHz).
-pub const RING_CAP: usize = 48_000 * 150 / 1000;
+/// Live host ring capacity in mono i16 samples (~500 ms @ 48 kHz).
+pub const RING_CAP: usize = 24_000;
 /// Rolling capture for WAV dump (~6 s @ 32 kHz).
 pub const CAPTURE_CAP: usize = 13_500 * 20; // ~20s @ game rate
 
@@ -35,6 +35,10 @@ impl SampleRing {
     }
 
     pub fn len(&self) -> usize {
+        self.inner.lock().map(|r| r.len()).unwrap_or(0)
+    }
+
+    pub fn available(&self) -> usize {
         self.inner.lock().map(|r| r.len()).unwrap_or(0)
     }
 

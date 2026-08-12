@@ -230,17 +230,26 @@ fn mix_sample(
     if !master {
         return 0;
     }
+    let mut active = 0u32;
     let mut acc = 0i32;
     if en_a {
+        active += 1;
         let sh = if regs.fifo_a_full_vol() { 7 } else { 6 };
         acc += (hold_a as i32) << sh;
     }
     if en_b {
+        active += 1;
         let sh = if regs.fifo_b_full_vol() { 7 } else { 6 };
         acc += (hold_b as i32) << sh;
     }
     if psg != 0 {
+        active += 1;
         acc += (psg as i32) >> regs.psg_volume_shift();
+    }
+    // Pre-attenuate when multiple sources active to prevent clipping
+    if active > 1 {
+        let scale = 2.0f32 / active as f32;
+        acc = (acc as f32 * scale) as i32;
     }
     soft_clip(acc)
 }
@@ -266,11 +275,11 @@ pub fn timer_cps_rate(reload: u16, ctrl: u16) -> (u32, u32, bool) {
 
 #[inline]
 fn soft_clip(x: i32) -> i16 {
-    let x = x.clamp(-48000, 48000);
-    if x > 28000 {
-        (28000 + (x - 28000) / 4).min(32767) as i16
-    } else if x < -28000 {
-        (-28000 + (x + 28000) / 4).max(-32768) as i16
+    let x = x.clamp(-65536, 65536);
+    if x > 31000 {
+        (31000 + (x - 31000) / 6).min(32767) as i16
+    } else if x < -31000 {
+        (-31000 + (x + 31000) / 6).max(-32768) as i16
     } else {
         x as i16
     }
