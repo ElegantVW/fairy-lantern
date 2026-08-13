@@ -63,7 +63,7 @@ Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`
 | 8 | Only USR/IRQ/SVC banked | **Fixed** (FIQ/UND/ABT) |
 | 9 | `LDM/STM ^` user-bank ignored | **Fixed** |
 | 10 | SWI never enters SVC | **Fixed** — enter SVC + I + ARM, HLE, restore SPSR (SoftReset may stay out) |
-| 11 | SoftReset / Sqrt / RegisterRamReset | **Partial** — SoftReset honors `03007FFA`; IWRAM wipe keeps last 0x200; **Sqrt is integer** |
+| 11 | SoftReset / Sqrt / RegisterRamReset | **Partial** — SoftReset + integer Sqrt; IWRAM keeps last 0x200; bit7 clears IO not CPU |
 | 12 | HBlank at end of 1232-cycle line | **Fixed** (`HBLANK_CYCLE = 1006`) |
 | 13 | Affine identity / PD caps | **Gated** — still default-on; `FAIRY_ACCURATE_AFFINE=1` disables |
 | 14 | DMA3 video capture | **Open** |

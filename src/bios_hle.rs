@@ -188,25 +188,29 @@ fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
         bus.oam.fill(0);
     }
     if flags & 0x20 != 0 {
-        // clear SIO, sound, timers partially — clear IO range
-        for i in 0x60..0xB0 {
-            if i < bus.io.len() {
-                bus.io[i] = 0;
-            }
-        }
+        // SIO
+        zero_io(bus, 0x120, 0x12F);
+        zero_io(bus, 0x134, 0x15B);
     }
     if flags & 0x40 != 0 {
-        for i in 0x00..0x60 {
-            if i < bus.io.len() {
-                bus.io[i] = 0;
-            }
-        }
+        // Sound
+        zero_io(bus, 0x060, 0x0A8);
     }
-    // always clear some regs
     if flags & 0x80 != 0 {
-        for r in cpu.r.iter_mut().take(12) {
-            *r = 0;
-        }
+        // All other IO (not CPU regs). Leave KEYINPUT 0x130 — it's the pad latch.
+        zero_io(bus, 0x000, 0x056);
+        zero_io(bus, 0x0B0, 0x0DF); // DMA
+        zero_io(bus, 0x100, 0x10F); // timers
+        zero_io(bus, 0x132, 0x133); // KEYCNT
+        zero_io(bus, 0x200, 0x208); // IE/IF/WAITCNT/IME
+    }
+}
+
+fn zero_io(bus: &mut Bus, start: usize, end_incl: usize) {
+    let end = (end_incl + 1).min(bus.io.len());
+    let start = start.min(end);
+    for b in &mut bus.io[start..end] {
+        *b = 0;
     }
 }
 
@@ -667,6 +671,23 @@ mod tests {
         cpu.r[0] = 200;
         super::dispatch(&mut cpu, &mut bus, 0x08);
         assert_eq!(cpu.r[0], 14);
+    }
+
+    #[test]
+    fn ram_reset_bit7_clears_io_not_cpu() {
+        let (mut cpu, mut bus) = harness();
+        cpu.r[0] = 0x80;
+        cpu.r[1] = 0x1122_3344;
+        bus.write16(0x0400_0000, 0x1140);
+        bus.write16(0x0400_00BA, 0x8000);
+        bus.write16(0x0400_0102, 0x0080);
+        bus.write16(0x0400_0208, 1);
+        register_ram_reset(&mut cpu, &mut bus);
+        assert_eq!(cpu.r[1], 0x1122_3344, "bit7 is not a CPU wipe");
+        assert_eq!(bus.read16(0x0400_0000), 0);
+        assert_eq!(bus.read16(0x0400_00BA), 0);
+        assert_eq!(bus.read16(0x0400_0102), 0);
+        assert_eq!(bus.read16(0x0400_0208), 0);
     }
 
     #[test]
