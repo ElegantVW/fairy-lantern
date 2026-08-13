@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# fairy — rebuild Fairy Lantern if the tree is newer, then run it.
+set -euo pipefail
+
+ROOT="${FAIRY_LANTERN_ROOT:-$HOME/fairy-lantern}"
+if [[ ! -d "$ROOT/src" || ! -f "$ROOT/Cargo.toml" ]]; then
+  # script lives in <repo>/scripts/fairy when run from the tree
+  here="$(cd "$(dirname "$0")" && pwd)"
+  if [[ -d "$here/../src" && -f "$here/../Cargo.toml" ]]; then
+    ROOT="$(cd "$here/.." && pwd)"
+  fi
+fi
+
+if [[ ! -f "$ROOT/Cargo.toml" ]]; then
+  echo "fairy: cannot find the fairy-lantern repo (set FAIRY_LANTERN_ROOT)" >&2
+  exit 1
+fi
+
+BIN="$ROOT/target/release/fairy"
+need=0
+if [[ ! -x "$BIN" ]]; then
+  need=1
+else
+  newest="$(find "$ROOT/src" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" \
+    -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
+  built="$(stat -c '%Y' "$BIN" 2>/dev/null || echo 0)"
+  # newest is epoch.fraction; compare as integers
+  newest_i="${newest%.*}"
+  if [[ -n "$newest_i" && "$newest_i" -gt "$built" ]]; then
+    need=1
+  fi
+fi
+
+if [[ "$need" -eq 1 ]]; then
+  echo "fairy: source newer than binary — cargo build --release" >&2
+  (cd "$ROOT" && cargo build --release --quiet)
+fi
+
+if [[ ! -x "$BIN" ]]; then
+  echo "fairy: build failed ($BIN missing)" >&2
+  exit 1
+fi
+
+exec "$BIN" "$@"

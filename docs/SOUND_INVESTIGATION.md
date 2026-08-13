@@ -1,6 +1,17 @@
 # Sound investigation — Pokemon Liquid Crystal (v3.3.00512)
 
-Status: ROOT CAUSE IDENTIFIED (game hangs in boot init; music never started).
+**Status (2026-08-13): FIXED and committed.** The hang below was timer
+readback + IRQ/IntrWait + FIFO special DMA. Headless 400-frame run now reaches
+the IWRAM stream decoder (`0x03002C38`) with FIFO audio at ~13.4 kHz.
+
+This file is the historical write-up of the drone/hang. Do not treat the
+“ROOT CAUSE IDENTIFIED (game hangs)” diagnosis as current. See `AGENTS.md`
+and `docs/AUDIT.md` for present status. For the APU/FIFO/host
+path as it exists now, see [SOUND_AUDIT.md](SOUND_AUDIT.md).
+
+---
+
+Status (original): ROOT CAUSE IDENTIFIED (game hangs in boot init; music never started).
 Full detail for anyone resuming this thread.
 
 ## Symptom

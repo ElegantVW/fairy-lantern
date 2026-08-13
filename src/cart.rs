@@ -5,6 +5,16 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+/// Largest GBA cart image we will load (32 MiB). Caps zip bombs and huge files.
+pub const MAX_ROM_BYTES: u64 = 32 * 1024 * 1024;
+
+pub fn check_rom_len(len: u64, label: &str) -> Result<()> {
+    if len > MAX_ROM_BYTES {
+        bail!("{label} is {len} bytes (max {MAX_ROM_BYTES})");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct Cart {
     pub data: Vec<u8>,
@@ -27,8 +37,12 @@ impl Cart {
         let (data, inner) = if ext == "zip" {
             load_gba_from_zip(path)?
         } else {
+            let meta = std::fs::metadata(path)
+                .with_context(|| format!("stat fable {}", path.display()))?;
+            check_rom_len(meta.len(), &format!("fable {}", path.display()))?;
             let data = std::fs::read(path)
                 .with_context(|| format!("read fable {}", path.display()))?;
+            check_rom_len(data.len() as u64, &format!("fable {}", path.display()))?;
             (data, None)
         };
 
@@ -104,6 +118,9 @@ fn load_gba_from_zip(path: &Path) -> Result<(Vec<u8>, Option<String>)> {
             continue;
         }
         let sz = entry.size();
+        if sz > MAX_ROM_BYTES {
+            continue;
+        }
         if sz >= 0xC0 && sz >= best_size {
             best_size = sz;
             best_i = Some(i);
@@ -118,11 +135,20 @@ fn load_gba_from_zip(path: &Path) -> Result<(Vec<u8>, Option<String>)> {
         );
     };
 
-    let mut entry = archive.by_index(i)?;
+    let entry = archive.by_index(i)?;
     let mut data = Vec::with_capacity(best_size as usize);
+    // Bound the decoder so a lying local-file header cannot inflate past 32 MiB.
     entry
+        .take(MAX_ROM_BYTES + 1)
         .read_to_end(&mut data)
         .with_context(|| format!("extract {best_name} from zip"))?;
+    check_rom_len(data.len() as u64, &format!("zip entry {best_name}"))?;
+    if data.len() as u64 != best_size {
+        bail!(
+            "zip size mismatch for {best_name}: declared {best_size}, got {}",
+            data.len()
+        );
+    }
     if data.len() < 0xC0 {
         bail!("extracted {best_name} is too small");
     }
@@ -174,4 +200,20 @@ pub fn print_info(cart: &Cart) {
         cart.size() as f64 / 1024.0
     );
     println!("  entry:  0x{:08X} (homebrew-style)", cart.entry_pc());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rom_cap_allows_32mib() {
+        assert!(check_rom_len(MAX_ROM_BYTES, "rom").is_ok());
+    }
+
+    #[test]
+    fn rom_cap_rejects_oversize() {
+        let err = check_rom_len(MAX_ROM_BYTES + 1, "rom").unwrap_err();
+        assert!(err.to_string().contains("max"));
+    }
 }

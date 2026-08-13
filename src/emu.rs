@@ -100,7 +100,11 @@ impl Emu {
                 if self.bus.halt_wait {
                     let c = 64u32;
                     self.timers.reload = self.bus.timer_reload;
-                    timers::step(&mut self.timers, &mut self.bus, c);
+                    let ov = timers::step(&mut self.timers, &mut self.bus, c);
+                    for i in 0..4 {
+                        self.bus.timer_overflows[i] =
+                            self.bus.timer_overflows[i].saturating_add(ov[i]);
+                    }
                     self.bus.timer_reload = self.timers.reload;
                     // Apply any timer-start reloads latched by MMIO writes
                     self.bus.apply_timer_starts(&mut self.timers);
@@ -135,7 +139,11 @@ impl Emu {
                 let c = self.cpu.step(&mut self.bus);
                 self.timers.reload = self.bus.timer_reload;
                 self.bus.apply_timer_starts(&mut self.timers);
-                timers::step(&mut self.timers, &mut self.bus, c);
+                let ov = timers::step(&mut self.timers, &mut self.bus, c);
+                for i in 0..4 {
+                    self.bus.timer_overflows[i] =
+                        self.bus.timer_overflows[i].saturating_add(ov[i]);
+                }
                 self.bus.timer_reload = self.timers.reload;
                 if self.ppu.line == 0 && self.ppu.line_cycles < 32 {
                     self.ppu.latch_affine_from_bus(&self.bus);
@@ -192,7 +200,10 @@ impl Emu {
             }
             if self.step_cycles(64) {
                 frames += 1;
-                if std::env::var_os("FAIRY_DMA_TRACE").is_some() && (200..=260).contains(&frames) {
+                if frames % 25 == 0 && std::env::var_os("FAIRY_MIX_STAT").is_some() {
+                    dump_mix_stat(&self.bus, frames);
+                }
+                if crate::cpu::fairy_trace() && (200..=260).contains(&frames) {
                     let w = &self.bus.iwram[0x62A0..0x68C0];
                     let d = if let Some(prev) = self.dbg_win_prev.as_ref() {
                         w.iter().zip(prev.iter()).filter(|(a, b)| a != b).count()
@@ -226,6 +237,85 @@ impl Emu {
         self.flush_battery();
         frames
     }
+}
+
+/// m4a SoundInfo @ 0x03005F50, 12×64-byte SoundChannels @ 0x03005FA0.
+/// DMA1 walks pcmBuffer A (0x62A0, 1584 bytes); VSync should rewind SAD
+/// every pcmDmaPeriod frames. A stuck START/LOOP voice or a SAD that never
+/// rewinds is the "first SFX under the song, then mush" pattern.
+fn dump_mix_stat(bus: &Bus, frames: u32) {
+    let iw = &bus.iwram;
+    let rd8 = |off: usize| iw.get(off).copied().unwrap_or(0);
+    let rd32 = |off: usize| u32::from_le_bytes([rd8(off), rd8(off + 1), rd8(off + 2), rd8(off + 3)]);
+    let stat = |off: usize, n: usize| {
+        let mut peak = 0u32;
+        let mut sum = 0u32;
+        let mut rail = 0u32;
+        for i in 0..n {
+            let a = (rd8(off + i) as i8).unsigned_abs() as u32;
+            peak = peak.max(a);
+            sum += a;
+            if a >= 120 {
+                rail += 1;
+            }
+        }
+        (peak, sum / n.max(1) as u32, rail)
+    };
+    let (ap, am, ar) = stat(0x62A0, 1584);
+    let (bp, bm, br) = stat(0x68D0, 1584);
+    let ident = rd32(0x5F50);
+    let dma_ctr = rd8(0x5F54);
+    let reverb = rd8(0x5F55);
+    let max_ch = rd8(0x5F56);
+    let masvol = rd8(0x5F57);
+    let period = rd8(0x5F5B);
+    let spv = rd32(0x5F60) as i32;
+    let divf = rd32(0x5F68);
+    eprint!(
+        "MIXSTAT f{frames} A peak={ap} mean={am} rail={ar}  B peak={bp} mean={bm} rail={br}  \
+         id={ident:08X} ctr={dma_ctr} per={period} rev={reverb} ch={max_ch} vol={masvol} spv={spv} div={divf:08X}  A0="
+    );
+    for i in 0..12 {
+        eprint!("{:02X}", rd8(0x62A0 + i));
+    }
+    let src1 = bus.dma.ch[1].src;
+    let src2 = bus.dma.ch[2].src;
+    eprint!("  dma1={src1:08X} dma2={src2:08X}");
+    eprintln!();
+    eprint!("  chans");
+    for i in 0..12 {
+        let base = 0x5FA0 + i * 0x40;
+        let flags = rd8(base);
+        // SOUND_CHANNEL_SF_ON = START|STOP|IEC|ENV = 0xC7
+        if flags & 0xC7 == 0 {
+            continue;
+        }
+        let typ = rd8(base + 1);
+        let evy = rd8(base + 9);
+        let evr = rd8(base + 10);
+        let evl = rd8(base + 11);
+        let count = rd32(base + 0x18);
+        let fw = rd32(base + 0x1C);
+        let freq = rd32(base + 0x20);
+        let wav = rd32(base + 0x24);
+        let ptr = rd32(base + 0x28);
+        eprint!(
+            " [{i} st={flags:02X} ty={typ:02X} ev={evy:02X}/{evr:02X}/{evl:02X} \
+             n={count:X} fw={fw:X} f={freq:X} wav={wav:08X} p={ptr:08X}]"
+        );
+    }
+    eprintln!();
+    eprint!("  songs");
+    for &sbase in &[
+        0x6FB0usize, 0x6F70, 0x73D0, 0x7380, 0x7340, 0x7300,
+    ] {
+        let status = rd32(sbase + 4);
+        let clock = rd32(sbase + 0xC);
+        if status != 0 || clock != 0 {
+            eprint!(" @{sbase:04X} st={status:08X} clk={clock}");
+        }
+    }
+    eprintln!();
 }
 
 /// Headless key automation for advancing title screens / menus / overworld.

@@ -1,11 +1,12 @@
-//! Host audio: pipe raw game-rate samples to aplay / pw-cat.
-//! Device resamples to output rate natively. No internal resampler, no fpos.
+//! Host audio: resample game-rate PCM to 48 kHz and pipe to aplay / pw-cat.
+//! Device is opened once and never restarted.
 
-use super::resample::{SampleRing, RING_CAP};
+use super::resample::{PullResampler, SampleRing, HOST_RATE};
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 pub const SLEEP_MS: u64 = 1;
 
@@ -40,6 +41,98 @@ impl HostAudio {
         self.game_rate.lock().map(|r| *r).unwrap_or(0)
     }
 
+    /// 440 Hz sine. Default goes through the **same ring + 13.4 kHz→48 kHz
+    /// resampler** as a ROM. `--direct` writes 48 kHz straight to the device.
+    pub fn play_tone(seconds: f32) {
+        Self::play_tone_via_ring(seconds);
+    }
+
+    pub fn play_tone_direct(seconds: f32) {
+        let spawn: fn(u32) -> Option<Child> = if which("pw-cat") {
+            spawn_pw_cat
+        } else {
+            spawn_aplay
+        };
+        let mut child = match spawn(HOST_RATE) {
+            Some(c) => c,
+            None => {
+                eprintln!("  audio: cannot open pw-cat/aplay");
+                return;
+            }
+        };
+        let Some(mut sin) = child.stdin.take() else {
+            let _ = child.kill();
+            return;
+        };
+        eprintln!(
+            "  audio: tone 440 Hz stereo {}s @ {HOST_RATE} Hz — if this is clean, the pipe is fine",
+            seconds
+        );
+        let frames = (HOST_RATE as f32 * seconds.max(0.5)) as usize;
+        let chunk = HOST_RATE as usize / 50; // 20 ms
+        let mut i = 0usize;
+        let two_pi = std::f64::consts::TAU;
+        while i < frames {
+            let n = chunk.min(frames - i);
+            let mut buf = Vec::with_capacity(n * 4);
+            for k in 0..n {
+                let t = (i + k) as f64 / f64::from(HOST_RATE);
+                let s = (t * 440.0 * two_pi).sin() * 9000.0;
+                let v = s as i16;
+                buf.extend_from_slice(&v.to_le_bytes());
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            if sin.write_all(&buf).is_err() {
+                break;
+            }
+            i += n;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(sin);
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("  audio: tone done");
+    }
+
+    pub fn play_tone_via_ring(seconds: f32) {
+        let ring = SampleRing::new();
+        let host = Self::start(ring.clone_handle());
+        const SRC: u32 = 13378;
+        host.set_game_rate(SRC);
+        eprintln!(
+            "  audio: tone 440 Hz via ring+resampler ({}s @ {SRC}→{HOST_RATE}) — this is the in-game path",
+            seconds
+        );
+        let frames = (SRC as f32 * seconds.max(0.5)) as usize;
+        let start = Instant::now();
+        let two_pi = std::f64::consts::TAU;
+        let mut i = 0usize;
+        while i < frames {
+            while ring.frames() > SRC as usize / 6 {
+                thread::sleep(Duration::from_millis(4));
+            }
+            let n = 256.min(frames - i);
+            let mut batch = Vec::with_capacity(n * 2);
+            for k in 0..n {
+                let t = (i + k) as f64 / f64::from(SRC);
+                let s = (t * 440.0 * two_pi).sin() * 9000.0;
+                let v = s as i16;
+                batch.push(v);
+                batch.push(v);
+            }
+            ring.push_batch(&batch);
+            i += n;
+            let target = Duration::from_secs_f64(i as f64 / f64::from(SRC));
+            let now = start.elapsed();
+            if target > now {
+                thread::sleep(target - now);
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+        host.stop();
+        eprintln!("  audio: tone done");
+    }
+
     pub fn start(ring: SampleRing) -> Self {
         let stop = Arc::new(Mutex::new(false));
         let stop2 = Arc::clone(&stop);
@@ -48,10 +141,12 @@ impl HostAudio {
         let game_rate = Arc::new(Mutex::new(0u32));
         let rate2 = Arc::clone(&game_rate);
 
-        let (backend, spawn_fn): (&'static str, fn(u32) -> Option<Child>) = if which("aplay") {
-            ("aplay", spawn_aplay)
-        } else if which("pw-cat") {
+        // pw-cat first: aplay-on-PipeWire repeats the last period on underrun
+        // (the "it loops" the play window was producing).
+        let (backend, spawn_fn): (&'static str, fn(u32) -> Option<Child>) = if which("pw-cat") {
             ("pw-cat", spawn_pw_cat)
+        } else if which("aplay") {
+            ("aplay", spawn_aplay)
         } else {
             ("none", |_| None)
         };
@@ -64,7 +159,7 @@ impl HostAudio {
         if backend == "none" {
             eprintln!("  audio: FAILED — need aplay or pw-cat");
         } else {
-            eprintln!("  audio: {backend} (pipes game rate direct; device resamples)");
+            eprintln!("  audio: {backend} (48 kHz stereo; open after prebuffer)");
         }
 
         Self {
@@ -108,9 +203,9 @@ fn which(bin: &str) -> bool {
 fn spawn_aplay(rate: u32) -> Option<Child> {
     Command::new("aplay")
         .args([
-            "-t", "raw", "-f", "S16_LE", "-c", "1",
+            "-t", "raw", "-f", "S16_LE", "-c", "2",
             "-r", &rate.to_string(),
-            "--buffer-time=200000",
+            "--buffer-time=250000",
             "--period-time=20000",
             "-q", "-",
         ])
@@ -126,7 +221,7 @@ fn spawn_pw_cat(rate: u32) -> Option<Child> {
         .args([
             "--playback", "--raw", "--format", "s16",
             "--rate", &rate.to_string(),
-            "--channels", "1", "--latency", "80ms", "-",
+            "--channels", "2", "--latency", "200ms", "-",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -144,90 +239,58 @@ fn host_pipe_loop(
 ) {
     let mut child: Option<Child> = None;
     let mut stdin: Option<std::process::ChildStdin> = None;
-    let mut last_rate: u32 = 0;
-    let mut primed = false;
-    let mut buf_bytes = Vec::with_capacity(4096);
+    let mut rs = PullResampler::new();
+    // 20 ms of stereo frames at 48 kHz → 960 frames × 2 i16
+    let frames = (HOST_RATE / 50) as usize;
+    let mut out = vec![0i16; frames * 2];
+    let mut buf_bytes = Vec::with_capacity(out.len() * 2);
+    let chunk = Duration::from_nanos(1_000_000_000 * frames as u64 / HOST_RATE as u64);
+    let mut deadline = Instant::now();
 
     loop {
         if stop.lock().map(|s| *s).unwrap_or(true) {
             break;
         }
 
-        let want = game_rate.lock().map(|r| *r).unwrap_or(0);
-        if want < 8000 {
-            thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
-            continue;
-        }
-
-        // Reopen if rate changes.
-        if want != last_rate || child.is_none() {
-            drop(stdin.take());
-            if let Some(mut c) = child.take() {
-                let _ = c.kill();
-                let _ = c.wait();
+        let src_rate = game_rate.lock().map(|r| *r).unwrap_or(0);
+        // Do not open the device (or invent a rate) until the FIFO timer has
+        // locked AND the ring has ~60 ms of samples. Opening aplay/pw-cat at
+        // boot and starving it made PipeWire loop the last period forever.
+        let prebuffer = (src_rate as usize / 8).max(512); // ~125 ms
+        if child.is_none() {
+            if src_rate < 4000 || ring.frames() < prebuffer {
+                thread::sleep(Duration::from_millis(10));
+                continue;
             }
-            child = spawn(want);
+            child = spawn(HOST_RATE);
             if let Some(ref c) = child {
                 *player_pid.lock().unwrap() = Some(c.id());
+                eprintln!(
+                    "  audio: host open @ {HOST_RATE} Hz stereo ({} frames buffered)",
+                    ring.frames()
+                );
             } else {
                 *player_pid.lock().unwrap() = None;
-                thread::sleep(std::time::Duration::from_millis(20));
+                thread::sleep(Duration::from_millis(50));
                 continue;
             }
             stdin = child.as_mut().and_then(|c| c.stdin.take());
-            last_rate = want;
-            primed = false;
-            eprintln!("  audio: host open @ {want} Hz (game rate direct)");
+            deadline = Instant::now();
         }
 
-        // Prime ~120 ms of game audio before first write.
-        if !primed {
-            let need = (want as usize * 120 / 1000).max(512);
-            if ring.available() < need {
-                thread::sleep(std::time::Duration::from_millis(1));
-                continue;
+        if src_rate < 4000 {
+            deadline += chunk;
+            let now = Instant::now();
+            if deadline > now {
+                thread::sleep(deadline - now);
             }
-            primed = true;
-        }
-
-        // Adaptive drain: pull what's available (up to ~50ms worth).
-        let max_take = (want as usize * 50 / 1000).max(256);
-        let available = ring.available();
-        let take = max_take.min(available);
-
-        if take == 0 {
-            // Ring empty — feed silence to keep pipe alive, prevent looping
-            let silence = vec![0u8; 512];
-            if let Some(ref mut sin) = stdin {
-                let _ = sin.write_all(&silence);
-                let _ = sin.flush();
-            }
-            thread::sleep(std::time::Duration::from_millis(2));
             continue;
         }
 
-        // Sleep proportional to ring fill: more data → slightly longer sleep
-        let fill_pct = available as f32 / (RING_CAP as f32).max(1.0);
-        let sleep_ms = if fill_pct > 0.5 { 3 } else if fill_pct > 0.2 { 1 } else { 0 };
-        if sleep_ms > 0 {
-            thread::sleep(std::time::Duration::from_millis(sleep_ms));
-        }
-
+        rs.fill(&ring, src_rate, &mut out);
         buf_bytes.clear();
-        let mut underruns = 0usize;
-        if let Ok(mut r) = ring.inner.lock() {
-            for _ in 0..take {
-                match r.pop_front() {
-                    Some(s) => buf_bytes.extend_from_slice(&s.to_le_bytes()),
-                    None => { underruns += 1; buf_bytes.extend_from_slice(&0i16.to_le_bytes()); }
-                }
-            }
-        }
-        let _ = underruns;
-
-        if buf_bytes.is_empty() {
-            thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
-            continue;
+        for s in &out {
+            buf_bytes.extend_from_slice(&s.to_le_bytes());
         }
 
         if let Some(ref mut sin) = stdin {
@@ -238,16 +301,20 @@ fn host_pipe_loop(
                     let _ = c.wait();
                 }
                 *player_pid.lock().unwrap() = None;
-                last_rate = 0;
-                primed = false;
                 if stop.lock().map(|s| *s).unwrap_or(true) {
                     break;
                 }
-            } else {
-                let _ = sin.flush();
             }
-        } else {
-            thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+        }
+
+        // Exactly 10 ms of audio per loop. A shorter sleep ate the ring at 1.25×
+        // and the play window then skipped frame waits to refill — chopped music.
+        deadline += chunk;
+        let now = Instant::now();
+        if deadline > now {
+            thread::sleep(deadline - now);
+        } else if now.duration_since(deadline) > chunk * 3 {
+            deadline = now;
         }
     }
 

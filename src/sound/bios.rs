@@ -1,14 +1,9 @@
-//! m4a / MP2K SoundDriver BIOS SWI HLE.
+//! GBA BIOS audio SWIs (0x19–0x2B).
 //!
-//! Implements the GBA BIOS audio SWIs (0x19–0x2B) that commercial games
-//! call for mixing, music playback, and frequency computation.
-//!
-//! ## SoundInfo (in IWRAM, GBA_NITRO_SOUND_WORK address)
-//! The game's ROM m4a engine sets up SoundInfo* → channels → DMA FIFO buffer.
-//! SoundDriverMain mixes active channels and writes to that buffer; DMA1/2
-//! (special timing) feeds the buffer into our FIFO → mixer path.
-//!
-//! Reference: GBATEK "Sound Controller / m4a (Sappy) engine" section.
+//! SoundBias (0x19) and MidiKey2Freq (0x1F/0x2B) do real work.
+//! SoundDriverMain / MusicPlayer* are **stubs**: they must not write a fake
+//! PCM buffer into IWRAM. ROM-side mixers (mp2k, Smsh, …) own that memory.
+//! Games that rely on the BIOS mixer will be silent until a real MP2K HLE exists.
 
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -155,25 +150,11 @@ pub fn sound_bias(bus: &mut Bus, level: u32) {
 }
 
 pub fn sound_driver_init(cpu: &mut Cpu, bus: &mut Bus) {
-    let area = cpu.r[0];
     bus.sound_driver.init_count = bus.sound_driver.init_count.wrapping_add(1);
-    // Write the SoundArea magic so games detect "initialized".
+    let area = cpu.r[0];
     if area >= 0x0300_0000 && area < 0x0400_0000 {
-        // Write ident = initialized flag (games check this).
-        bus.write32(area, 1);
-        // Write an ident string some games read back.
-        bus.write32(area + 0x04, 0x4E4453_21); // "SDN!"
-        // Set channels ptr to 0 (no channels — game will populate).
-        bus.write32(area + 0x08, 0);
-        bus.write32(area + 0x0C, 12); // max channels default
-        // Write sample rate — default ~13379 Hz for m4a
-        bus.write32(area + 0x14, 13379);
-        // Write default DA flags: FIFO A L/R enabled, both full vol.
-        bus.write32(area + 0x18, 0x0F00);
-        // Save info addr for Main
         bus.sound_driver.info_addr = area;
     }
-    // Many games ignore the return value; keep r0 = area as hints.
 }
 
 pub fn sound_driver_mode(bus: &mut Bus, mode: u32) {
@@ -191,131 +172,17 @@ pub fn sound_driver_mode(bus: &mut Bus, mode: u32) {
 }
 
 pub fn sound_driver_main(bus: &mut Bus) {
+    // Stub: do not invent PCM into IWRAM. ROM mixers own the DMA source.
     bus.sound_driver.main_count = bus.sound_driver.main_count.wrapping_add(1);
-    let info = bus.sound_driver.info_addr;
-    if info < 0x0300_0000 || info >= 0x0400_0000 {
-        return;
-    }
-    // Read SoundInfo fields from emulated RAM.
-    let ch_ptr = bus.read32(info + 0x08);
-    let max_ch = bus.read32(info + 0x0C).min(24) as usize;
-    let volume = bus.read32(info + 0x10);
-    let da_flags = bus.read32(info + 0x18) as u16;
-    let buf_len = bus.read32(info + 0x1C) as usize;
-    let buf_ptr = bus.read32(info + 0x20);
-    // If game cleared buffer, no mix needed.
-    if buf_ptr == 0 || buf_len == 0 || ch_ptr == 0 {
-        return;
-    }
-    // Apply DA flags to SOUNDCNT_H if present.
-    let fl = da_flags;
-    if fl != 0 {
-        let cur = bus.read16(0x0400_0082);
-        // Preserve PSG volume bits 0–1; override DMA-enable and timer-select bits.
-        let mask = (1u16 << 2) | (1 << 3) | (0xFF << 8) | (0xFF << 12);
-        let new_h = (cur & !mask) | (fl & mask);
-        bus.write16_raw(0x0400_0082, new_h);
-        // Write SOUNDCNT_X master-enable.
-        bus.write16_raw(0x0400_0084, 0x80);
-    }
-    // Mix a frame of audio: for each channel slot, if active, decode one
-    // sample and sum into the DMA buffer at the appropriate position.
-    //
-    // The DMA buffer is in IWRAM; DMA1/2 (special timing) reads 4 words
-    // at a time from here into the hardware FIFO. We fill it with mixed
-    // 8-bit signed samples, interleaved for two FIFOs if both enabled.
-    let ch_size = 64; // each channel struct is 64 bytes
-    let vol_scale = (volume as i32).clamp(0, 256);
-    let mut mix_buf = vec![0i32; buf_len.min(1024)];
-    let mut channel_count = 0u32;
-
-    for i in 0..max_ch {
-        let ch_addr = ch_ptr + (i as u32) * ch_size;
-        if ch_addr < 0x0300_0000 || ch_addr >= 0x0400_0000 {
-            continue;
-        }
-        let status = bus.read32(ch_addr);
-        if status != 1 {
-            continue; // not active
-        }
-        let typ = bus.read32(ch_addr + 0x04);
-        let sample_ptr = bus.read32(ch_addr + 0x08);
-        let sample_end = bus.read32(ch_addr + 0x0C);
-        if sample_ptr == 0 || sample_end <= sample_ptr {
-            continue;
-        }
-        let loop_ptr = bus.read32(ch_addr + 0x10);
-        let _freq = bus.read32(ch_addr + 0x14);
-        let vol_ch = bus.read32(ch_addr + 0x18);
-        let _pan = bus.read32(ch_addr + 0x2C);
-
-        // Read sample byte at current position.
-        let sample_byte = bus.read8(sample_ptr);
-        let sample: i8 = if typ == 0 {
-            // unsigned PCM8
-            sample_byte.wrapping_sub(0x80) as i8
-        } else {
-            // signed PCM8 (or ADPCM simplified — treat as signed for now)
-            sample_byte as i8
-        };
-        // Advance read pointer. Simple PCM: 1 byte per sample.
-        // ADPCM would use 4-bit nibbles; omitted for now.
-        let mut next_ptr = sample_ptr + 1;
-        if next_ptr >= sample_end {
-            if loop_ptr != 0 && loop_ptr < sample_end && loop_ptr >= sample_ptr {
-                next_ptr = loop_ptr;
-            } else {
-                // End of sample — mark channel inactive.
-                bus.write32(ch_addr, 0);
-                continue;
-            }
-        }
-        bus.write32(ch_addr + 0x08, next_ptr);
-
-        // Scale sample: channel volume (0–256) * master volume / 256
-        let v = (sample as i32) * (vol_ch as i32).clamp(0, 256) / 256 * vol_scale / 256;
-        // Simple mono mix; fill the DMA buffer as interleaved 8-bit samples.
-        // DMA FIFO A gets even samples, B gets odd (or both same — simple case).
-        for (j, d) in mix_buf.iter_mut().enumerate().take(buf_len) {
-            if (j % 2) as u32 == channel_count % 2 {
-                *d = (*d as i32 + v).clamp(-128, 127) as i32;
-            }
-        }
-        channel_count += 1;
-    }
-
-    // Write mixed buffer back to the DMA destination in IWRAM.
-    for (j, &s) in mix_buf.iter().enumerate().take(buf_len.min(1024)) {
-        bus.write8(buf_ptr + j as u32, s as u8);
-    }
+    let _ = bus.sound_driver.info_addr;
 }
 
 pub fn sound_driver_vsync(bus: &mut Bus) {
     bus.sound_driver.vsync_count = bus.sound_driver.vsync_count.wrapping_add(1);
-    // Advance sample cursor used by games for timing.
-    // Some games check a flag/mirror in SoundInfo after vsync.
-    let info = bus.sound_driver.info_addr;
-    if info >= 0x0300_0000 && info < 0x0400_0000 {
-        // Bump a sample counter games use to pace note updates.
-        let cnt = bus.read32(info + 0x04);
-        bus.write32(info + 0x04, cnt.wrapping_add(1));
-    }
 }
 
 pub fn sound_channel_clear(bus: &mut Bus) {
-    let info = bus.sound_driver.info_addr;
-    if info < 0x0300_0000 || info >= 0x0400_0000 {
-        return;
-    }
-    let ch_ptr = bus.read32(info + 0x08);
-    let max_ch = bus.read32(info + 0x0C).min(24) as usize;
-    if ch_ptr >= 0x0300_0000 && ch_ptr < 0x0400_0000 {
-        // Zero-out channel status fields (game will reuse slots).
-        for i in 0..max_ch {
-            let ch_addr = ch_ptr + (i as u32) * 64;
-            bus.write32(ch_addr, 0);
-        }
-    }
+    let _ = bus;
 }
 
 pub fn midi_key_freq(cpu: &mut Cpu, bus: &mut Bus) {

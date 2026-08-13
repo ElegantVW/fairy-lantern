@@ -42,8 +42,13 @@ pub struct Bus {
     pub(crate) timer_ctrl_prev: [u16; 4],
     /// Channels that need counter←reload on next timer step (bit0=TM0…).
     pub timer_start_mask: u8,
+    /// Overflows since last `tick_sound` (DirectSound sample clock).
+    pub timer_overflows: [u32; 4],
     /// Last value driven on the data bus (open-bus for unmapped reads).
     last_bus: Cell<u32>,
+    /// Last instruction-fetch address (for N vs S waitstates).
+    last_fetch: Cell<u32>,
+    last_fetch_ok: Cell<bool>,
     /// BIOS IntrWait / Halt: run until these IF bits appear (or VBlank)
     pub halt_wait: bool,
     pub intr_wait_mask: u16,
@@ -97,7 +102,10 @@ impl Bus {
             timer_reload: [0; 4],
             timer_ctrl_prev: [0; 4],
             timer_start_mask: 0,
+            timer_overflows: [0; 4],
             last_bus: Cell::new(0),
+            last_fetch: Cell::new(0),
+            last_fetch_ok: Cell::new(false),
             halt_wait: false,
             intr_wait_mask: 0,
             hle_bios,
@@ -317,7 +325,7 @@ impl Bus {
             0x03 => {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static BWR: AtomicU64 = AtomicU64::new(0);
-                if std::env::var_os("FAIRY_DMA_TRACE").is_some()
+                if crate::cpu::fairy_trace()
                     && (0x0300_28E0..0x0300_28EC).contains(&a)
                 {
                     eprintln!(
@@ -325,7 +333,7 @@ impl Bus {
                         a, val, self.dbg_evt, self.dbg_pc
                     );
                 }
-                if std::env::var_os("FAIRY_DMA_TRACE").is_some()
+                if crate::cpu::fairy_trace()
                     && (0x0300_5FA0..0x0300_6228).contains(&a)
                 {
                     use std::sync::atomic::{AtomicU64, Ordering};
@@ -338,7 +346,7 @@ impl Bus {
                         );
                     }
                 }
-                if std::env::var_os("FAIRY_DMA_TRACE").is_some()
+                if crate::cpu::fairy_trace()
                     && (0x0300_62A0..0x0300_6F00).contains(&a)
                 {
                     let c = BWR.fetch_add(1, Ordering::Relaxed);
@@ -490,7 +498,7 @@ impl Bus {
                     if idx < 4 {
                         self.timer_reload[idx] = val;
                     }
-                    if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+                    if crate::cpu::fairy_trace() {
                         eprintln!("ioW {:08X}={:04X} evt{}", a, val, self.dbg_evt);
                     }
                     return;
@@ -500,7 +508,7 @@ impl Bus {
                     let idx = ((a - 0x0400_0102) / 4) as usize;
                     let prev = self.timer_ctrl_prev.get(idx).copied().unwrap_or(0);
                     self.write16_raw(a, val);
-                    if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+                    if crate::cpu::fairy_trace() {
                         eprintln!("ioW {:08X}={:04X} evt{}", a, val, self.dbg_evt);
                     }
                     if idx < 4 {
@@ -513,7 +521,7 @@ impl Bus {
                 }
                  0x0400_00BC | 0x0400_00BE | 0x0400_00C0 | 0x0400_00C2 | 0x0400_00C4
                 | 0x0400_00C8 | 0x0400_00CA | 0x0400_00CC | 0x0400_00CE | 0x0400_00D0 => {
-                    if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+                    if crate::cpu::fairy_trace() {
                         eprintln!(
                             "dmaW {:08X}={:04X} evt{} pc={:08X}",
                             a, val, self.dbg_evt, self.dbg_pc
@@ -523,7 +531,7 @@ impl Bus {
                     return;
                 }
                  0x0400_00B0 | 0x0400_00B2 | 0x0400_00B4 | 0x0400_00B6 | 0x0400_00B8 => {
-                    if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+                    if crate::cpu::fairy_trace() {
                         eprintln!(
                             "dmaW {:08X}={:04X} evt{} pc={:08X}",
                             a, val, self.dbg_evt, self.dbg_pc
@@ -534,7 +542,7 @@ impl Bus {
                 }
                  0x0400_00C6 | 0x0400_00D2 => {
                     self.write16_raw(a, val);
-                    if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+                    if crate::cpu::fairy_trace() {
                         eprintln!("dmaW {:08X}={:04X} CNT_H evt{} pc={:08X}", a, val, self.dbg_evt, self.dbg_pc);
                     }
                     let ch = if a == 0x0400_00C6 { 1 } else { 2 };
@@ -545,7 +553,7 @@ impl Bus {
                 }
                 // SOUNDCNT_H — FIFO reset bits 11/15 clear A/B (write-1-to-reset)
                 0x0400_0082 => {
-                    if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+                    if crate::cpu::fairy_trace() {
                         eprintln!("ioW {:08X}={:04X} evt{}", a, val, self.dbg_evt);
                     }
                     if val & (1 << 11) != 0 {
@@ -560,7 +568,7 @@ impl Bus {
                 }
                 // SOUNDCNT_X — master enable
                 0x0400_0084 => {
-                    if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+                    if crate::cpu::fairy_trace() {
                         eprintln!("ioW {:08X}={:04X} evt{}", a, val, self.dbg_evt);
                     }
                     self.write16_raw(a, val);
@@ -568,12 +576,7 @@ impl Bus {
                 }
                 0x0400_00BA | 0x0400_00DE => {
                     self.write16_raw(a, val);
-                    let ch = match a {
-                        0x0400_00BA => 0,
-                        0x0400_00C6 => 1,
-                        0x0400_00D2 => 2,
-                        _ => 3,
-                    };
+                    let ch = if a == 0x0400_00BA { 0 } else { 3 };
                     let mut dma = std::mem::take(&mut self.dma);
                     dma.on_cnt_h_write(self, ch);
                     self.dma = dma;
@@ -583,32 +586,14 @@ impl Bus {
                 0x0400_0000 => {
                     self.write16_raw(a, val);
                     let mode = val & 7;
-                    if mode == 1 || mode == 2 {
-                        // Many games never write a full identity matrix after boot; they
-                        // only touch BG2X/Y via ChangeBgX. Ensure a usable matrix when
-                        // PA/PD are still zero (power-on / DmaFill leftovers).
+                    if crate::cpu::affine_compat() && (mode == 1 || mode == 2) {
+                        // Liquid Crystal / battle HUD: games often skip writing PA/PD.
+                        // Disable with FAIRY_ACCURATE_AFFINE=1.
                         Self::ensure_affine_identity(self, 2);
                         if mode == 2 {
                             Self::ensure_affine_identity(self, 3);
                         }
                     }
-                    return;
-                }
-                // SOUNDCNT_H — FIFO reset bits 11/15 clear A/B (write-1-to-reset)
-                0x0400_0082 => {
-                    if val & (1 << 11) != 0 {
-                        self.sound.reset_fifo_a();
-                    }
-                    if val & (1 << 15) != 0 {
-                        self.sound.reset_fifo_b();
-                    }
-                    // Don't store sticky reset bits
-                    self.write16_raw(a, val & !((1 << 11) | (1 << 15)));
-                    return;
-                }
-                // SOUNDCNT_X — master enable
-                0x0400_0084 => {
-                    self.write16_raw(a, val);
                     return;
                 }
                 // PSG channel frequency/control — bit15 = init/retrigger (write-only)
@@ -683,7 +668,7 @@ impl Bus {
 
     pub fn write32(&mut self, addr: u32, val: u32) {
         let a = addr & !3;
-        if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+        if crate::cpu::fairy_trace() {
             // 6 song structs' +4 and +0x34 fields
             const SONG_FIELDS: [u32; 12] = [
                 0x0300_6FB4, 0x0300_6FE4, 0x0300_6F74, 0x0300_6FA4, 0x0300_73D4, 0x0300_7404,
@@ -715,7 +700,7 @@ impl Bus {
         }
         // Sound FIFO A/B — word writes from DMA
         if a == 0x0400_00A0 {
-            if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+            if crate::cpu::fairy_trace() {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static FW: AtomicU64 = AtomicU64::new(0);
                 let c = FW.fetch_add(1, Ordering::Relaxed);
@@ -760,7 +745,9 @@ impl Bus {
         let t0 = self.read16(0x0400_0102);
         let t1 = self.read16(0x0400_0106);
         let reloads = self.timer_reload;
-        self.sound.step(cycles, &regs, reloads, t0, t1);
+        let ov = self.timer_overflows;
+        self.timer_overflows = [0; 4];
+        self.sound.step(cycles, &regs, reloads, t0, t1, ov);
         // Refill FIFOs when the mixer marked them half-empty (not only on HBlank).
         if self.sound.dma_req_a || self.sound.dma_req_b {
             let mut dma = std::mem::take(&mut self.dma);
@@ -809,52 +796,101 @@ impl Bus {
         }
     }
 
-    /// Approximate waitstates for instruction fetch at `pc` (adds to base I-cycles).
-    /// Uses WAITCNT (0x04000204) for ROM; EWRAM is always slow.
+    /// Instruction-fetch waitstates beyond the 1 I-cycle baseline.
+    /// Sequential if `pc` is last_fetch+2 or +4 in the same region; else N-cycle.
     pub fn fetch_waitstates(&self, pc: u32) -> u32 {
+        let sequential = self.last_fetch_ok.get()
+            && (pc == self.last_fetch.get().wrapping_add(2)
+                || pc == self.last_fetch.get().wrapping_add(4))
+            && (pc >> 24) == (self.last_fetch.get() >> 24);
+        self.last_fetch.set(pc);
+        self.last_fetch_ok.set(true);
+
         match pc >> 24 {
-            // BIOS / IWRAM / IO / palette / VRAM / OAM — fast enough; 0 extra
             0x00 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07 => 0,
-            // EWRAM: +2 wait on 16/32-bit (3 total for halfword) — add 2
-            0x02 => 2,
-            // Game Pak ROM / EEPROM region
+            0x02 => 2, // EWRAM: +2 on 16/32-bit
             0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
-                let waitcnt = self.read16(0x0400_0204);
-                // Non-seq 16-bit first access wait: bits 2-3 (ROM0), 5-6 (ROM1), 8-9 (ROM2)
-                let (shift, s_bit) = match pc >> 24 {
-                    0x08 | 0x09 => (2u32, 4u32),  // ROM0 + pref enable bit4
-                    0x0A | 0x0B => (5, 4),
-                    _ => (8, 4),
-                };
-                let n = (waitcnt >> shift) & 3;
-                // Map 0..3 → 4,3,2,8 cycles total N-seq → extra wait ≈ n_map-1
-                let n_cycles = match n {
-                    0 => 4,
-                    1 => 3,
-                    2 => 2,
-                    _ => 8,
-                };
-                // Sequential cheaper; average fetch ≈ (N + S)/2 with S often N-1
-                let s_cycles = if waitcnt & (1 << s_bit) != 0 {
-                    // Prefetch buffer: treat as mostly sequential
-                    match (waitcnt >> (shift + 0)) & 1 {
-                        _ => (n_cycles / 2).max(1),
+                let (n_cycles, s_cycles) = self.rom_ns(pc);
+                let prefetch = self.read16(0x0400_0204) & (1 << 14) != 0;
+                let total: u32 = if sequential {
+                    if prefetch {
+                        1
+                    } else {
+                        s_cycles
                     }
                 } else {
-                    match n {
-                        0 => 2,
-                        1 => 1,
-                        2 => 1,
-                        _ => 4,
-                    }
+                    n_cycles
                 };
-                // Report extra beyond 1 I-cycle baseline
-                ((n_cycles + s_cycles) / 2u32).saturating_sub(1)
+                total.saturating_sub(1)
             }
-            // SRAM / Flash
             0x0E | 0x0F => 4,
             _ => 1,
         }
+    }
+
+    fn rom_ns(&self, addr: u32) -> (u32, u32) {
+        let waitcnt = self.read16(0x0400_0204);
+        let (n_shift, s_bit) = match addr >> 24 {
+            0x08 | 0x09 => (2u32, 4u32),
+            0x0A | 0x0B => (5, 7),
+            _ => (8, 10),
+        };
+        let n = (waitcnt >> n_shift) & 3;
+        let n_cycles = match n {
+            0 => 4,
+            1 => 3,
+            2 => 2,
+            _ => 8,
+        };
+        let s_cycles = if waitcnt & (1 << s_bit) != 0 { 1 } else { 2 };
+        (n_cycles, s_cycles)
+    }
+
+    /// Extra cycles on a data access (beyond the 1 I-cycle the insn already counted).
+    pub fn data_waitstates(&self, addr: u32, bytes: u32) -> u32 {
+        match addr >> 24 {
+            0x00 | 0x03 | 0x04 => 0,
+            0x02 => {
+                if bytes >= 4 {
+                    4
+                } else {
+                    2
+                }
+            }
+            0x05 | 0x06 | 0x07 => {
+                if bytes >= 4 {
+                    1
+                } else {
+                    0
+                }
+            }
+            0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
+                let (n, s) = self.rom_ns(addr);
+                let total = if bytes >= 4 { n.saturating_add(s) } else { n };
+                total.saturating_sub(1)
+            }
+            0x0E | 0x0F => 4,
+            _ => 0,
+        }
+    }
+
+    /// Extra cycles for a burst of `words` 32-bit transfers (LDM/STM).
+    pub fn data_burst_waitstates(&self, addr: u32, words: u32) -> u32 {
+        let words = words.max(1);
+        let first = self.data_waitstates(addr, 4);
+        if words == 1 {
+            return first;
+        }
+        let rest = match addr >> 24 {
+            0x02 => 2 * (words - 1),
+            0x05 | 0x06 | 0x07 => words - 1,
+            0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
+                let (_, s) = self.rom_ns(addr);
+                s.saturating_sub(1).saturating_mul(words - 1)
+            }
+            _ => 0,
+        };
+        first.saturating_add(rest)
     }
 
     pub fn set_keys_pressed(&mut self, pressed_mask: u16) {
@@ -897,5 +933,52 @@ fn vram_index(addr: u32) -> usize {
         a
     } else {
         a % VRAM_SIZE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cart::Cart;
+
+    #[test]
+    fn sequential_rom_fetch_cheaper_than_n() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let bus = Bus::new(&cart, None);
+        // WAITCNT=0 → WS0 N=4, S=2
+        let n = bus.fetch_waitstates(0x0800_0000);
+        let s = bus.fetch_waitstates(0x0800_0004);
+        let n2 = bus.fetch_waitstates(0x0800_1000);
+        assert_eq!(n, 3, "N-cycle extra");
+        assert_eq!(s, 1, "S-cycle extra");
+        assert_eq!(n2, 3, "taken branch is N again");
+        assert!(s < n);
+    }
+
+    #[test]
+    fn rom_32bit_data_costs_n_plus_s() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let bus = Bus::new(&cart, None);
+        let w16 = bus.data_waitstates(0x0800_0000, 2);
+        let w32 = bus.data_waitstates(0x0800_0000, 4);
+        assert_eq!(w16, 3, "N=4 minus the 1 already in the insn");
+        assert_eq!(w32, 5, "N+S=6 minus 1");
+        assert!(w32 > w16);
+        let iwram = bus.data_waitstates(0x0300_0000, 4);
+        assert_eq!(iwram, 0);
     }
 }

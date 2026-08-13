@@ -54,8 +54,11 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
     println!("✦ Fairy Lantern lit — {title}");
     println!("  arrows/WASD move · Z/Space=A · X=B · Enter=Start · P pause · Esc snuff");
     println!("  F5 savestate · F7 loadstate · battery autosaves to .sav · audio+clock on");
+    println!("  audio: DirectSound A+B (mp2k L/R)  ·  FAIRY_DS=a|b  ·  FAIRY_AUDIO=sine fairy  → beep");
 
     let mut next_frame = Instant::now();
+    let mut audio_origin: Option<Instant> = None;
+    let mut audio_frame0: u64 = 0;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         if window.is_key_pressed(Key::P, KeyRepeat::No) {
             paused = !paused;
@@ -105,32 +108,32 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
         emu.bus.set_keys_pressed(keys);
 
         if !paused {
-            if !emu.run_one_frame() {
+            // Always run at least one frame so the window cannot freeze white.
+            // Once FIFO audio is live, catch up to wall-clock: X11 vsync on
+            // present is ~16 ms, one GBA frame is 16.7 ms of audio — 1:1
+            // present underruns the pipe and PipeWire loops the last period.
+            if !run_frame(emu, &mut frame_n)? {
                 bail!("frame watchdog — CPU stuck (pc=0x{:08X})", emu.cpu.pc());
             }
-            frame_n += 1;
-            if frame_n == 60 || frame_n == 300 || frame_n == 900 {
-                let peak = emu.bus.sound.peak_abs();
-                let backend = emu.bus.sound.backend_name();
-                let fa = emu.bus.sound.fifo_a_len();
-                let fb_ = emu.bus.sound.fifo_b_len();
-                let ring = emu.bus.sound.ring_len();
-                let from = emu.bus.sound.samples_from_fifo;
-                eprintln!(
-                    "  audio@{frame_n}: backend={backend} peak={peak} fifoA={fa} fifoB={fb_} ring={ring} from_fifo={from}"
-                );
-                if frame_n == 300 {
-                    let wav = std::env::temp_dir().join("fairy-lantern-audio.wav");
-                    if let Err(e) = emu.bus.sound.dump_wav(&wav) {
-                        eprintln!("  audio: wav dump failed: {e}");
-                    } else {
-                        eprintln!(
-                            "  audio: wrote {} (play with: aplay {})",
-                            wav.display(),
-                            wav.display()
-                        );
-                    }
+            if emu.bus.sound.fifo_locked() {
+                if audio_origin.is_none() {
+                    audio_origin = Some(Instant::now());
+                    audio_frame0 = frame_n;
                 }
+                let origin = audio_origin.unwrap();
+                let target = audio_frame0
+                    + origin.elapsed().as_nanos() as u64 / frame_budget.as_nanos() as u64;
+                let mut extra = 0u32;
+                let rate = emu.bus.sound.stream_rate.max(8_000) as usize;
+                let ring_high = (rate / 10).max(256); // ~100 ms — do not overfill
+                while frame_n < target && extra < 5 && emu.bus.sound.ring_frames() < ring_high {
+                    if !run_frame(emu, &mut frame_n)? {
+                        bail!("frame watchdog — CPU stuck (pc=0x{:08X})", emu.cpu.pc());
+                    }
+                    extra += 1;
+                }
+            } else {
+                audio_origin = None;
             }
         }
 
@@ -142,16 +145,25 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
         }
 
         // Title: fable · RTC/clock · status
-        let clk = if frame_n % 30 == 0 || status.is_empty() {
-            emu.bus.rtc.clock_string()
-        } else {
-            emu.bus.rtc.clock_string()
-        };
+        let clk = emu.bus.rtc.clock_string();
         let elapsed = clock_start.elapsed().as_secs();
-        let win_title = if status.is_empty() {
-            format!("Fairy Lantern — {title} · {clk} · t={elapsed}s")
+        let unk = if emu.cpu.unknown_ops > 0 {
+            format!(" · unk_ops={}", emu.cpu.unknown_ops)
         } else {
-            format!("Fairy Lantern — {title} · {clk} · {status}")
+            String::new()
+        };
+        let mix = if std::env::var("FAIRY_AUDIO")
+            .map(|v| v.eq_ignore_ascii_case("sine"))
+            .unwrap_or(false)
+        {
+            " · MIX=SINE"
+        } else {
+            " · MIX=AB@32k"
+        };
+        let win_title = if status.is_empty() {
+            format!("Fairy Lantern — {title} · {clk} · t={elapsed}s{unk}{mix}")
+        } else {
+            format!("Fairy Lantern — {title} · {clk} · {status}{unk}{mix}")
         };
         window.set_title(&win_title);
 
@@ -159,32 +171,14 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             .update_with_buffer(&fb, ppu::WIDTH, ppu::HEIGHT)
             .map_err(|e| anyhow::anyhow!("present: {e}"))?;
 
-        // Pace to GBA frame clock, with light audio water-marks so the host
-        // ring neither starves nor grows without bound under load.
+        // Sleep only when ahead of the GBA clock. If present vsynced and we
+        // are late, do not sleep — the next loop's catch-up fills the ring.
         next_frame += frame_budget;
         let now = Instant::now();
-        let ring = emu.bus.sound.ring_len();
-        // Watermarks in ms; low ≈ 80 ms, high ≈ 200 ms (BT-friendly).
-        let rate = emu.bus.sound.stream_rate.max(8000) as usize;
-        let ring_low = rate.saturating_mul(80) / 1000;
-        let ring_high = rate.saturating_mul(200) / 1000;
-        if ring < ring_low {
-            // Behind on audio — skip sleep this frame to refill.
+        if next_frame > now {
+            std::thread::sleep(next_frame - now);
+        } else if now.duration_since(next_frame) > frame_budget * 4 {
             next_frame = now;
-        } else if next_frame > now {
-            let mut wait = next_frame - now;
-            if ring > ring_high {
-                // Ahead on audio — allow a little extra sleep (cap +4 ms).
-                wait += Duration::from_millis(4);
-            }
-            std::thread::sleep(wait);
-        } else {
-            // Fell behind video — resync, but don't hard-reset every frame if
-            // only slightly late (keeps audio feed smoother).
-            let late = now - next_frame;
-            if late > frame_budget * 3 {
-                next_frame = now;
-            }
         }
     }
 
@@ -192,6 +186,45 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
     emu.flush_battery();
     println!("  lantern snuffed (battery flushed).");
     Ok(())
+}
+
+fn run_frame(emu: &mut Emu, frame_n: &mut u64) -> Result<bool> {
+    if !emu.run_one_frame() {
+        return Ok(false);
+    }
+    *frame_n += 1;
+    if *frame_n == 1 {
+        eprintln!("  video: first frame presented");
+    }
+    log_audio_probe(emu, *frame_n);
+    Ok(true)
+}
+
+fn log_audio_probe(emu: &Emu, frame_n: u64) {
+    if frame_n != 60 && frame_n != 300 && frame_n != 900 {
+        return;
+    }
+    let peak = emu.bus.sound.peak_abs();
+    let backend = emu.bus.sound.backend_name();
+    let fa = emu.bus.sound.fifo_a_len();
+    let fb_ = emu.bus.sound.fifo_b_len();
+    let ring = emu.bus.sound.ring_frames();
+    let from = emu.bus.sound.samples_from_fifo;
+    eprintln!(
+        "  audio@{frame_n}: backend={backend} peak={peak} fifoA={fa} fifoB={fb_} ring={ring} from_fifo={from}"
+    );
+    if frame_n == 300 {
+        let wav = std::env::temp_dir().join("fairy-lantern-audio.wav");
+        if let Err(e) = emu.bus.sound.dump_wav(&wav) {
+            eprintln!("  audio: wav dump failed: {e}");
+        } else {
+            eprintln!(
+                "  audio: wrote {} (48 kHz stereo — play with: aplay {})",
+                wav.display(),
+                wav.display()
+            );
+        }
+    }
 }
 
 fn poll_keys(window: &Window) -> u16 {

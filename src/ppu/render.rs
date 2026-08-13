@@ -579,15 +579,18 @@ fn composite_affine_bg(
     } else {
         0x0400_0030
     };
-    let mut pa = bus.read16(base) as i16 as i32;
+    let pa = bus.read16(base) as i16 as i32;
     let pb = bus.read16(base + 2) as i16 as i32;
-    let mut pc = bus.read16(base + 4) as i16 as i32;
+    let pc = bus.read16(base + 4) as i16 as i32;
     let pd = bus.read16(base + 6) as i16 as i32;
-    // Sanitize garbage matrices (games only set X/Y, or IO leftovers).
-    let (pa, pc) = if pa.abs() < 0x10 && pb.abs() < 0x10 {
-        (0x100, 0)
-    } else if pc.abs() > 0x400 {
-        (pa, 0)
+    let (pa, pc) = if crate::cpu::affine_compat() {
+        if pa.abs() < 0x10 && pb.abs() < 0x10 {
+            (0x100, 0)
+        } else if pc.abs() > 0x400 {
+            (pa, 0)
+        } else {
+            (pa, pc)
+        }
     } else {
         (pa, pc)
     };

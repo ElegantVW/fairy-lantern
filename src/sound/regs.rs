@@ -27,10 +27,30 @@ impl PsgRegs {
         self.sndx & 0x80 != 0
     }
 
-    /// FIFO A destination enables (bits 8–9): L/R. Nonzero = channel on.
+    /// FIFO A destination enables (bit8=R, bit9=L). Nonzero = channel on.
     #[inline]
     pub fn fifo_a_enable(&self) -> bool {
         (self.sndh >> 8) & 3 != 0
+    }
+
+    #[inline]
+    pub fn fifo_a_right(&self) -> bool {
+        self.sndh & (1 << 8) != 0
+    }
+
+    #[inline]
+    pub fn fifo_a_left(&self) -> bool {
+        self.sndh & (1 << 9) != 0
+    }
+
+    #[inline]
+    pub fn fifo_b_right(&self) -> bool {
+        self.sndh & (1 << 12) != 0
+    }
+
+    #[inline]
+    pub fn fifo_b_left(&self) -> bool {
+        self.sndh & (1 << 13) != 0
     }
 
     /// FIFO B destination enables (bits 12–13).

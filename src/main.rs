@@ -107,6 +107,14 @@ enum Commands {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// 440 Hz sine — default uses the in-game ring/resampler; --direct is raw 48 kHz
+    Tone {
+        #[arg(long, default_value_t = 3.0)]
+        seconds: f32,
+        /// Skip the ring (48 kHz straight into pw-cat)
+        #[arg(long)]
+        direct: bool,
+    },
 }
 
 fn main() {
@@ -164,6 +172,13 @@ fn real_main() -> Result<()> {
         }
         Some(Commands::Tui { dir: _ }) => {
             run_home_tui(None)?;
+        }
+        Some(Commands::Tone { seconds, direct }) => {
+            if direct {
+                crate::sound::HostAudio::play_tone_direct(seconds);
+            } else {
+                crate::sound::HostAudio::play_tone(seconds);
+            }
         }
         None => {
             if let Some(rom) = cli.rom {
@@ -281,14 +296,63 @@ fn run_rom(
         emu.bus.sound.stream_rate,
         emu.bus.sound.samples_out,
     );
+    {
+        let sndh = emu.bus.read16(0x0400_0082);
+        let sndx = emu.bus.read16(0x0400_0084);
+        let t0 = emu.bus.timer_reload[0];
+        let t1 = emu.bus.timer_reload[1];
+        let t0c = emu.bus.read16(0x0400_0102);
+        let t1c = emu.bus.read16(0x0400_0106);
+        let dma1_sad = emu.bus.read32(0x0400_00BC);
+        let dma2_sad = emu.bus.read32(0x0400_00C8);
+        let dma1_ctl = emu.bus.read16(0x0400_00C6);
+        let dma2_ctl = emu.bus.read16(0x0400_00D2);
+        let src1 = emu.bus.dma.ch[1].src;
+        let src2 = emu.bus.dma.ch[2].src;
+        println!(
+            "  audio_hw: sndh={sndh:04X} sndx={sndx:04X} t0={t0:04X}/{t0c:04X} t1={t1:04X}/{t1c:04X} \
+             dma1={dma1_sad:08X}/{src1:08X} ctl={dma1_ctl:04X} dma2={dma2_sad:08X}/{src2:08X} ctl={dma2_ctl:04X}"
+        );
+        let mut si = String::new();
+        for i in 0..12 {
+            si.push_str(&format!(" {:08X}", emu.bus.read32(0x0300_5F50 + i * 4)));
+        }
+        println!("  soundinfo:{si}");
+        let dump_at = |label: &str, addr: u32| {
+            let mut s = format!("  {label} @{addr:08X}:");
+            for i in 0..16 {
+                s.push_str(&format!(" {:02X}", emu.bus.read8(addr.wrapping_add(i))));
+            }
+            println!("{s}");
+        };
+        dump_at("mix", 0x0300_62A0);
+        if src1 >= 0x0200_0000 && src1 < 0x0400_0000 {
+            dump_at("dma1src", src1);
+        }
+        if src2 >= 0x0200_0000 && src2 < 0x0400_0000 {
+            dump_at("dma2src", src2);
+        }
+        let tmp = std::env::temp_dir();
+        match emu.bus.sound.dump_fifo_traces(&tmp) {
+            Ok(()) => {
+                let (ta, tb) = emu.bus.sound.fifo_trace();
+                println!(
+                    "  fifo_trace: A={} B={} → {}/fairy-fifo-{{a,b,ab}}.wav (ab is A=L B=R)",
+                    ta.len(),
+                    tb.len(),
+                    tmp.display()
+                );
+            }
+            Err(e) => eprintln!("  fifo_trace dump failed: {e}"),
+        }
+    }
     // Always leave a diagnostic capture for `aplay /tmp/fairy-lantern-audio.wav`
     {
         let wav = std::env::temp_dir().join("fairy-lantern-audio.wav");
         match emu.bus.sound.dump_wav(&wav) {
             Ok(()) => eprintln!(
-                "  audio: wrote {} ({} Hz capture)",
-                wav.display(),
-                emu.bus.sound.stream_rate
+                "  audio: wrote {} (48 kHz stereo)",
+                wav.display()
             ),
             Err(e) => eprintln!("  audio: wav dump failed: {e}"),
         }
@@ -625,7 +689,7 @@ fn run_self_tests() -> usize {
         let data: u64 = 0x0123_4567_89AB_CDEF;
         let mut stream: Vec<u16> = vec![1, 1, 0]; // start + write cmd
         for i in (0..6).rev() {
-            stream.push(((0u16 >> i) & 1)); // addr 0
+            stream.push((0u16 >> i) & 1); // addr 0
         }
         for i in (0..64).rev() {
             stream.push(((data >> i) & 1) as u16);
@@ -716,5 +780,38 @@ fn run_self_tests() -> usize {
         passed += 1;
     }
 
+    // ARM MSR #imm must change CPSR (mask includes bit 25)
+    {
+        let mut rom = vec![0u8; 0x200];
+        rom[0..4].copy_from_slice(&0xE321_F01Fu32.to_le_bytes());
+        let cart = Cart {
+            data: rom,
+            title: "msr".into(),
+            game_code: "M".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut emu = Emu::new(&cart, None);
+        emu.cpu.set_mode(0x13);
+        emu.cpu.cpsr.irq_disable = true;
+        emu.cpu.set_pc(0x0800_0000);
+        emu.cpu.step(&mut emu.bus);
+        assert_eq!(emu.cpu.cpsr.mode, 0x1F, "MSR CPSR_c, #0x1F");
+        assert!(!emu.cpu.cpsr.irq_disable);
+        assert_eq!(emu.cpu.unknown_ops, 0);
+        passed += 1;
+    }
+
     passed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_self_tests() {
+        assert_eq!(run_self_tests(), 9);
+    }
 }

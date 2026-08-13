@@ -103,7 +103,8 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     }
 
     // MSR (imm): xxxx00110_R10_field_1111_rot_imm
-    if (op & 0x0DB0_F000) == 0x0320_F000 {
+    // Mask must include bit 25 (I=1). 0x0DB0_F000 made the compare impossible.
+    if (op & 0x0FB0_F000) == 0x0320_F000 {
         let spsr = (op & (1 << 22)) != 0;
         let mask = (op >> 16) & 0xF;
         let imm = op & 0xFF;
@@ -265,7 +266,7 @@ fn barrel_shift(cpu: &Cpu, op: u32, carry_in: bool) -> (u32, bool) {
     }
     // register
     let rm = (op & 0xF) as usize;
-    let mut val = if rm == 15 {
+    let val = if rm == 15 {
         cpu.pc_arm_read() + 4
     } else {
         cpu.r[rm]
@@ -336,7 +337,7 @@ fn barrel_shift(cpu: &Cpu, op: u32, carry_in: bool) -> (u32, bool) {
                 if amount == 0 {
                     (val, carry_in)
                 } else if a == 0 {
-                    ((val >> 31) & 1 != 0, (val >> 31) & 1 != 0); // amount multiple of 32
+                    // ROR by 32/64/… : result unchanged, C = bit 31
                     let c = (val >> 31) & 1 != 0;
                     (val, c)
                 } else {
@@ -537,11 +538,58 @@ fn ldrh_strh(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             cpu.r[rn_i] = base.wrapping_add(offset);
         }
     }
-    2
+    let bytes = if h { 2 } else { 1 };
+    2 + bus.data_waitstates(addr, bytes)
+}
+
+/// ARM addressing mode 2 offset (LDR/STR/LDRB/STRB).
+/// Bit 25 = 0 → 12-bit immediate. Bit 25 = 1 → Rm shifted by an immediate.
+fn addr_mode2_offset(cpu: &Cpu, op: u32) -> u32 {
+    if op & (1 << 25) == 0 {
+        return op & 0xFFF;
+    }
+    let rm = (op & 0xF) as usize;
+    let val = if rm == 15 {
+        cpu.pc_arm_read().wrapping_add(4)
+    } else {
+        cpu.r[rm]
+    };
+    let shift_type = (op >> 5) & 3;
+    let amount = (op >> 7) & 0x1F;
+    match shift_type {
+        0 => {
+            // LSL #n (n=0 → no shift)
+            if amount == 0 {
+                val
+            } else {
+                val << amount
+            }
+        }
+        1 => {
+            // LSR #n (n=0 → LSR #32)
+            if amount == 0 {
+                0
+            } else {
+                val >> amount
+            }
+        }
+        2 => {
+            // ASR #n (n=0 → ASR #32)
+            let a = if amount == 0 { 32 } else { amount };
+            ((val as i32) >> a.min(31)) as u32
+        }
+        _ => {
+            // ROR #n (n=0 → RRX)
+            if amount == 0 {
+                (val >> 1) | if cpu.cpsr.c { 1 << 31 } else { 0 }
+            } else {
+                val.rotate_right(amount)
+            }
+        }
+    }
 }
 
 fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
-    let i = (op & (1 << 25)) != 0; // reg offset
     let p = (op & (1 << 24)) != 0; // pre
     let u = (op & (1 << 23)) != 0; // up
     let b = (op & (1 << 22)) != 0; // byte
@@ -550,18 +598,17 @@ fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     let rn_i = ((op >> 16) & 0xF) as usize;
     let rd = ((op >> 12) & 0xF) as usize;
     // Rn=PC → PC+8
-    let mut base = if rn_i == 15 {
+    let base = if rn_i == 15 {
         cpu.pc_arm_read()
     } else {
         cpu.r[rn_i]
     };
 
-    let offset = if !i {
-        op & 0xFFF
-    } else {
-        let (v, _) = barrel_shift(cpu, op, cpu.cpsr.c);
-        v
-    };
+    // Addressing mode 2: bit 25 is "reg offset", the opposite of data-processing
+    // bit 25 ("imm operand"). Feeding this opcode to barrel_shift treats
+    // Rm as an 8-bit rotated immediate — STRB [r5, r6] then writes r5+6
+    // instead of r5+r6. m4a reverb is `strb r0, [r5, r6]` with r6=1584.
+    let offset = addr_mode2_offset(cpu, op);
 
     let offset = if u {
         offset
@@ -582,8 +629,8 @@ fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             bus.read32(addr & !3).rotate_right((addr & 3) * 8)
         };
         if rd == 15 {
-            cpu.cpsr.thumb = (val & 1) != 0;
-            cpu.r[15] = val & !1;
+            // ARMv4: LDR PC stays in ARM; bit 0 does not select Thumb (use BX).
+            cpu.r[15] = val & !3;
         } else {
             cpu.r[rd] = val;
         }
@@ -608,9 +655,7 @@ fn ldr_str(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             cpu.r[rn_i] = base.wrapping_add(offset);
         }
     }
-    let _ = w;
-    let _ = base;
-    2
+    2 + bus.data_waitstates(addr, if b { 1 } else { 4 })
 }
 
 fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
@@ -637,6 +682,8 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     };
     let mut a = start;
     let load_pc = l && (list & (1 << 15)) != 0;
+    // S=1 and R15 not in list: transfer user-bank R8–R14 (GBATEK / ARM ARM).
+    let user_bank = s && !load_pc;
     for i in 0..16 {
         if list & (1 << i) != 0 {
             if l {
@@ -652,9 +699,11 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
                             cpu.r[15] = v & !3;
                         }
                     } else {
-                        cpu.cpsr.thumb = (v & 1) != 0;
-                        cpu.r[15] = v & !1;
+                        // ARMv4 LDM PC stays in ARM
+                        cpu.r[15] = v & !3;
                     }
+                } else if user_bank && (8..=14).contains(&i) {
+                    cpu.set_user_reg(i, v);
                 } else {
                     cpu.r[i] = v;
                 }
@@ -662,6 +711,8 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
                 let v = if i == 15 {
                     // STM PC stores PC+12
                     cpu.pc_arm_read().wrapping_add(4)
+                } else if user_bank && (8..=14).contains(&i) {
+                    cpu.user_reg(i)
                 } else {
                     cpu.r[i]
                 };
@@ -670,7 +721,7 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             a = a.wrapping_add(4);
         }
     }
-    if w && rn != 15 && !(s && !load_pc) {
+    if w && rn != 15 && !user_bank {
         let final_base = if u {
             addr.wrapping_add(4 * count)
         } else {
@@ -678,6 +729,5 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         };
         cpu.r[rn] = final_base;
     }
-    let _ = s;
-    count + 1
+    count + 1 + bus.data_burst_waitstates(start, count)
 }

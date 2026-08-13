@@ -43,7 +43,7 @@ impl DmaController {
         let dad = bus.read32(base + 4);
         let cnt_l = bus.read16(base + 8) as u32;
         let cnt_h = bus.read16(base + 10);
-        if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+        if crate::cpu::fairy_trace() {
             eprintln!(
                 "cntH ch{ch} SAD={:08X} DAD={:08X} CNT_L={:04X} CNT_H={:04X} evt{}",
                 sad, dad, cnt_l, cnt_h, bus.dbg_evt
@@ -116,7 +116,7 @@ impl DmaController {
             let mut c = self.ch[ch].clone();
             let saved = c.count;
             c.count = 4;
-            if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+            if crate::cpu::fairy_trace() {
                 let mut bytes = Vec::new();
                 for k in 0..4 {
                     bytes.push(bus.read32(c.src + k * 4));
@@ -131,7 +131,7 @@ impl DmaController {
             self.ch[ch] = c;
             bus.sound.clear_dma_req(which);
             bus.dbg_evt += 1;
-            if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+            if crate::cpu::fairy_trace() {
                 eprintln!(
                     "fifo ch{ch} refill src={:08X} evt{}",
                     self.ch[ch].src, bus.dbg_evt
@@ -210,7 +210,7 @@ fn run_transfer(bus: &mut Bus, ch: usize, c: &mut Channel) {
         } else {
             let v = bus.read16(src & !1);
             if (dst & !1) >= 0x0400_00B0 && (dst & !1) <= 0x0400_00DF {
-                if std::env::var_os("FAIRY_DMA_TRACE").is_some() {
+                if crate::cpu::fairy_trace() {
                     eprintln!(
                         "XFER ch{ch} dma dst={:08X} v={:04X} src={:08X} cntH={:04X} count={} evt{}",
                         dst, v, src, cnt_h, count, bus.dbg_evt
@@ -269,5 +269,45 @@ fn adj(addr: u32, mode: u16, step: u32) -> u32 {
         1 => addr.wrapping_sub(step),
         2 => addr,
         _ => addr.wrapping_add(step),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cart::Cart;
+    use crate::emu::Emu;
+
+    #[test]
+    fn fifo_special_refills_four_words() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut emu = Emu::new(&cart, None);
+        emu.bus.write32(0x0300_0000, 0x0403_0201);
+        emu.bus.write32(0x0300_0004, 0x0807_0605);
+        emu.bus.write32(0x0300_0008, 0x0C0B_0A09);
+        emu.bus.write32(0x0300_000C, 0x100F_0E0D);
+        // DMA1 SAD / DAD / CNT_L
+        emu.bus.write32(0x0400_00BC, 0x0300_0000);
+        emu.bus.write32(0x0400_00C0, 0x0400_00A0);
+        emu.bus.write16(0x0400_00C4, 4);
+        // enable + 32-bit + repeat + special
+        emu.bus.write16(0x0400_00C6, 0xB600);
+
+        assert!(emu.bus.dma.ch[1].active);
+        assert_eq!(emu.bus.sound.fifo_a_len(), 0);
+
+        let mut dma = std::mem::take(&mut emu.bus.dma);
+        dma.on_fifo_request(&mut emu.bus);
+        emu.bus.dma = dma;
+
+        assert_eq!(emu.bus.sound.fifo_a_len(), 16, "FIFO special DMA is 4 words");
+        assert_eq!(emu.bus.dma.ch[1].src, 0x0300_0010);
+        assert!(emu.bus.dma.ch[1].active, "repeat keeps the channel live");
     }
 }

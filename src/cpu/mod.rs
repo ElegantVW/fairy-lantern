@@ -16,6 +16,12 @@ pub fn fairy_trace() -> bool {
     *FAIRY_TRACE_ONCE.get_or_init(|| std::env::var_os("FAIRY_DMA_TRACE").is_some())
 }
 
+/// When false (`FAIRY_ACCURATE_AFFINE=1`), skip Liquid Crystal affine identity/PD hacks.
+pub fn affine_compat() -> bool {
+    static ONCE: OnceLock<bool> = OnceLock::new();
+    *ONCE.get_or_init(|| std::env::var_os("FAIRY_ACCURATE_AFFINE").is_none())
+}
+
 /// HLE BIOS address: IRQ epilogue (`ldmfd …; subs pc, lr, #4`).
 pub const BIOS_IRQ_RETURN: u32 = 0x0000_0138;
 
@@ -33,15 +39,26 @@ pub struct Cpu {
     /// Last unknown opcode (for diagnose).
     pub last_unknown: u32,
 
-    // Banked R13/R14 + SPSR (IRQ / SVC / USR-SYS)
+    // Banked registers (ARMv4T)
+    pub r8_usr: [u32; 5], // R8–R12 (also used by IRQ/SVC/ABT/UND/SYS)
     pub r13_usr: u32,
     pub r14_usr: u32,
+    pub r8_fiq: [u32; 5],
+    pub r13_fiq: u32,
+    pub r14_fiq: u32,
+    pub spsr_fiq: Cpsr,
     pub r13_irq: u32,
     pub r14_irq: u32,
     pub spsr_irq: Cpsr,
     pub r13_svc: u32,
     pub r14_svc: u32,
     pub spsr_svc: Cpsr,
+    pub r13_abt: u32,
+    pub r14_abt: u32,
+    pub spsr_abt: Cpsr,
+    pub r13_und: u32,
+    pub r14_und: u32,
+    pub spsr_und: Cpsr,
 }
 
 impl Default for Cpu {
@@ -60,15 +77,25 @@ impl Cpu {
             halted: false,
             unknown_ops: 0,
             last_unknown: 0,
+            r8_usr: [0; 5],
             r13_usr: 0x0300_7F00,
             r14_usr: 0,
-            // BIOS defaults
+            r8_fiq: [0; 5],
+            r13_fiq: 0x0300_7F80,
+            r14_fiq: 0,
+            spsr_fiq: Cpsr::default(),
             r13_irq: 0x0300_7FA0,
             r14_irq: 0,
             spsr_irq: Cpsr::default(),
             r13_svc: 0x0300_7FE0,
             r14_svc: 0,
             spsr_svc: Cpsr::default(),
+            r13_abt: 0x0300_7F00,
+            r14_abt: 0,
+            spsr_abt: Cpsr::default(),
+            r13_und: 0x0300_7F00,
+            r14_und: 0,
+            spsr_und: Cpsr::default(),
         }
     }
 
@@ -106,27 +133,40 @@ impl Cpu {
         self.cpsr.mode = new_mode;
     }
 
-    fn bank_slot(mode: u8) -> u8 {
-        match mode & 0x1F {
-            0x12 => 1, // IRQ
-            0x13 => 2, // SVC
-            _ => 0,    // USR / SYS / others
-        }
-    }
-
     fn bank_save(&mut self, mode: u8) {
-        match Self::bank_slot(mode) {
-            1 => {
+        match mode & 0x1F {
+            0x11 => {
+                self.r8_fiq.copy_from_slice(&self.r[8..13]);
+                self.r13_fiq = self.r[13];
+                self.r14_fiq = self.r[14];
+                self.spsr_fiq = self.spsr;
+            }
+            0x12 => {
+                self.r8_usr.copy_from_slice(&self.r[8..13]);
                 self.r13_irq = self.r[13];
                 self.r14_irq = self.r[14];
                 self.spsr_irq = self.spsr;
             }
-            2 => {
+            0x13 => {
+                self.r8_usr.copy_from_slice(&self.r[8..13]);
                 self.r13_svc = self.r[13];
                 self.r14_svc = self.r[14];
                 self.spsr_svc = self.spsr;
             }
+            0x17 => {
+                self.r8_usr.copy_from_slice(&self.r[8..13]);
+                self.r13_abt = self.r[13];
+                self.r14_abt = self.r[14];
+                self.spsr_abt = self.spsr;
+            }
+            0x1B => {
+                self.r8_usr.copy_from_slice(&self.r[8..13]);
+                self.r13_und = self.r[13];
+                self.r14_und = self.r[14];
+                self.spsr_und = self.spsr;
+            }
             _ => {
+                self.r8_usr.copy_from_slice(&self.r[8..13]);
                 self.r13_usr = self.r[13];
                 self.r14_usr = self.r[14];
             }
@@ -134,21 +174,98 @@ impl Cpu {
     }
 
     fn bank_restore(&mut self, mode: u8) {
-        match Self::bank_slot(mode) {
-            1 => {
+        match mode & 0x1F {
+            0x11 => {
+                self.r[8..13].copy_from_slice(&self.r8_fiq);
+                self.r[13] = self.r13_fiq;
+                self.r[14] = self.r14_fiq;
+                self.spsr = self.spsr_fiq;
+            }
+            0x12 => {
+                self.r[8..13].copy_from_slice(&self.r8_usr);
                 self.r[13] = self.r13_irq;
                 self.r[14] = self.r14_irq;
                 self.spsr = self.spsr_irq;
             }
-            2 => {
+            0x13 => {
+                self.r[8..13].copy_from_slice(&self.r8_usr);
                 self.r[13] = self.r13_svc;
                 self.r[14] = self.r14_svc;
                 self.spsr = self.spsr_svc;
             }
+            0x17 => {
+                self.r[8..13].copy_from_slice(&self.r8_usr);
+                self.r[13] = self.r13_abt;
+                self.r[14] = self.r14_abt;
+                self.spsr = self.spsr_abt;
+            }
+            0x1B => {
+                self.r[8..13].copy_from_slice(&self.r8_usr);
+                self.r[13] = self.r13_und;
+                self.r[14] = self.r14_und;
+                self.spsr = self.spsr_und;
+            }
             _ => {
+                self.r[8..13].copy_from_slice(&self.r8_usr);
                 self.r[13] = self.r13_usr;
                 self.r[14] = self.r14_usr;
             }
+        }
+    }
+
+    /// User-bank R8–R14 (for `LDM/STM ^` without PC).
+    pub fn user_reg(&self, i: usize) -> u32 {
+        let mode = self.cpsr.mode & 0x1F;
+        match i {
+            8..=12 => {
+                if mode == 0x11 {
+                    self.r8_usr[i - 8]
+                } else {
+                    self.r[i]
+                }
+            }
+            13 => {
+                if mode == 0x10 || mode == 0x1F {
+                    self.r[13]
+                } else {
+                    self.r13_usr
+                }
+            }
+            14 => {
+                if mode == 0x10 || mode == 0x1F {
+                    self.r[14]
+                } else {
+                    self.r14_usr
+                }
+            }
+            _ => self.r[i],
+        }
+    }
+
+    pub fn set_user_reg(&mut self, i: usize, v: u32) {
+        let mode = self.cpsr.mode & 0x1F;
+        match i {
+            8..=12 => {
+                if mode == 0x11 {
+                    self.r8_usr[i - 8] = v;
+                } else {
+                    self.r[i] = v;
+                    self.r8_usr[i - 8] = v;
+                }
+            }
+            13 => {
+                if mode == 0x10 || mode == 0x1F {
+                    self.r[13] = v;
+                }
+                self.r13_usr = v;
+            }
+            14 => {
+                if mode == 0x10 || mode == 0x1F {
+                    self.r[14] = v;
+                }
+                self.r14_usr = v;
+            }
+            _ => self.r[i] = v,
         }
     }
 
@@ -314,7 +431,6 @@ impl Cpu {
                 static RA: AtomicU64 = AtomicU64::new(0);
                 let h = RA.fetch_add(1, Ordering::Relaxed);
                 if h < 4 || h % 700 == 0 {
-                    let s = bus.read8(0x0300_5F50);
                     let pos = bus.read32(0x0300_5F50);
                     let cnt = bus.read8(0x0300_5F54);
                     let rel = bus.read8(0x0300_5F5B);
@@ -412,5 +528,178 @@ impl Cpu {
         } else {
             self.r[i] = v;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::Bus;
+    use crate::cart::Cart;
+
+    fn cart_with(ops: &[u32]) -> Cart {
+        let mut data = vec![0u8; 0x200];
+        for (i, op) in ops.iter().enumerate() {
+            data[i * 4..i * 4 + 4].copy_from_slice(&op.to_le_bytes());
+        }
+        Cart {
+            data,
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        }
+    }
+
+    #[test]
+    fn msr_imm_sets_sys_mode() {
+        // AL MSR CPSR_c, #0x1F  (System, I/F clear)
+        let cart = cart_with(&[0xE321_F01F]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        assert_eq!(cpu.cpsr.mode, 0x13, "reset is SVC");
+        assert!(cpu.cpsr.irq_disable);
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.cpsr.mode, 0x1F, "MSR #imm must change mode");
+        assert!(!cpu.cpsr.irq_disable);
+        assert!(!cpu.cpsr.fiq_disable);
+        assert!(!cpu.cpsr.thumb);
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn msr_imm_sets_irq_disable() {
+        // AL MSR CPSR_c, #0xDF  (System + I + F)
+        let cart = cart_with(&[0xE321_F0DF]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        cpu.cpsr.irq_disable = false;
+        cpu.cpsr.fiq_disable = false;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.cpsr.mode, 0x1F);
+        assert!(cpu.cpsr.irq_disable);
+        assert!(cpu.cpsr.fiq_disable);
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn strb_reg_offset_uses_rm_not_imm() {
+        // STRB r0, [r5, r6]  — must write r5+r6, not r5+(r6 as rotated imm8).
+        // m4a reverb is this encoding with r6 = PCM_DMA_BUF_SIZE (1584).
+        let cart = cart_with(&[0xE7C5_0006]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        cpu.r[0] = 0xAB;
+        cpu.r[5] = 0x0300_0000;
+        cpu.r[6] = 1584;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(bus.read8(0x0300_0000 + 1584), 0xAB, "STRB [r5, r6] → r5+1584");
+        assert_eq!(
+            bus.read8(0x0300_0006),
+            0,
+            "must not treat Rm as an 8-bit immediate (r5+6)"
+        );
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn ldr_reg_lsl_offset() {
+        // LDR r2, [r0, r1, LSL #2]
+        let cart = cart_with(&[0xE790_2101]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        bus.write32(0x0300_0010, 0x1234_5678);
+        cpu.r[0] = 0x0300_0000;
+        cpu.r[1] = 4;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[2], 0x1234_5678);
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn ldr_pc_stays_arm_on_v4() {
+        // LDR r15, [r0]  — word at [r0] has bit 0 set; must NOT enter Thumb.
+        let cart = cart_with(&[0xE590_F000]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.write32(0x0300_0000, 0x0800_0001);
+        cpu.set_mode(0x1F);
+        cpu.r[0] = 0x0300_0000;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert!(!cpu.cpsr.thumb, "ARMv4 LDR PC ignores bit 0");
+        assert_eq!(cpu.r[15] & 3, 0);
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn fiq_banks_r8_and_r13() {
+        let mut cpu = Cpu::new();
+        cpu.set_mode(0x1F);
+        cpu.r[8] = 0x1111_1111;
+        cpu.r[13] = 0xAAAA_0000;
+        cpu.set_mode(0x11); // FIQ
+        cpu.r[8] = 0x2222_2222;
+        cpu.r[13] = 0xBBBB_0000;
+        cpu.set_mode(0x1F);
+        assert_eq!(cpu.r[8], 0x1111_1111, "USR R8 restored");
+        assert_eq!(cpu.r[13], 0xAAAA_0000, "USR R13 restored");
+        cpu.set_mode(0x11);
+        assert_eq!(cpu.r[8], 0x2222_2222, "FIQ R8 restored");
+        assert_eq!(cpu.r[13], 0xBBBB_0000, "FIQ R13 restored");
+    }
+
+    #[test]
+    fn und_does_not_clobber_usr_sp() {
+        let mut cpu = Cpu::new();
+        cpu.set_mode(0x1F);
+        cpu.r[13] = 0x0300_7F00;
+        cpu.set_mode(0x1B); // UND
+        cpu.r[13] = 0xDEAD_BEEF;
+        cpu.set_mode(0x1F);
+        assert_eq!(cpu.r[13], 0x0300_7F00);
+    }
+
+    #[test]
+    fn stm_user_bank_stores_usr_sp() {
+        // STMIA r0, {r13}^
+        let cart = cart_with(&[0xE8C0_2000]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        cpu.r[13] = 0x1111_1111;
+        cpu.set_mode(0x12); // IRQ
+        cpu.r[13] = 0x2222_2222;
+        cpu.r[0] = 0x0300_0000;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(bus.read32(0x0300_0000), 0x1111_1111);
+        assert_eq!(cpu.r[13], 0x2222_2222, "IRQ SP unchanged");
+    }
+
+    #[test]
+    fn ldm_user_bank_loads_usr_sp() {
+        // LDMIA r0, {r13}^
+        let cart = cart_with(&[0xE8D0_2000]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        cpu.r[13] = 0x1111_1111;
+        cpu.set_mode(0x12);
+        cpu.r[13] = 0x2222_2222;
+        cpu.r[0] = 0x0300_0000;
+        bus.write32(0x0300_0000, 0x3333_3333);
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[13], 0x2222_2222, "IRQ SP not overwritten");
+        assert_eq!(cpu.r13_usr, 0x3333_3333);
     }
 }

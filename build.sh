@@ -8,16 +8,18 @@ BIN="$ROOT/target/release/fairy-lantern"
 echo "built: $BIN"
 ls -la "$BIN"
 if [[ "${1:-}" == "install" ]]; then
+  WRAP="$ROOT/scripts/fairy"
+  chmod +x "$WRAP"
   mkdir -p "$ROOT/../bin" "$HOME/bin"
-  for name in fairy-lantern fairy; do
-    SRC="$ROOT/target/release/$name"
-    # both bins share the same code; fairy is a second Cargo bin
-    if [[ ! -x $SRC ]]; then
-      SRC="$BIN"
-    fi
-    cp -f "$SRC" "$ROOT/../bin/$name"
-    cp -f "$SRC" "$HOME/bin/$name"
-    chmod +x "$ROOT/../bin/$name" "$HOME/bin/$name"
+  for dest in "$ROOT/../bin" "$HOME/bin"; do
+    cp -f "$WRAP" "$dest/fairy"
+    cp -f "$WRAP" "$dest/fairy-lantern"
+    chmod +x "$dest/fairy" "$dest/fairy-lantern"
   done
-  echo "installed → $HOME/bin/fairy-lantern and $HOME/bin/fairy"
+  if [[ -d "$HOME/faeos/bin" ]]; then
+    cp -f "$WRAP" "$HOME/faeos/bin/fairy"
+    cp -f "$WRAP" "$HOME/faeos/bin/fairy-lantern"
+    chmod +x "$HOME/faeos/bin/fairy" "$HOME/faeos/bin/fairy-lantern"
+  fi
+  echo "installed wrapper → $HOME/bin/fairy (rebuilds $ROOT when src is newer)"
 fi

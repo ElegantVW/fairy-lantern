@@ -158,7 +158,8 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         let l = (op & 0x0800) != 0;
         let rb = ((op >> 8) & 7) as usize;
         let list = op & 0xFF;
-        let mut addr = cpu.r[rb];
+        let start = cpu.r[rb];
+        let mut addr = start;
         for i in 0..8 {
             if list & (1 << i) != 0 {
                 if l {
@@ -172,7 +173,8 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         if list != 0 {
             cpu.r[rb] = addr;
         }
-        return 2;
+        let n = list.count_ones().max(1);
+        return 2 + bus.data_burst_waitstates(start, n);
     }
 
     // Load/store with imm
@@ -196,7 +198,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         } else {
             bus.write32(addr & !3, cpu.r[rd]);
         }
-        return 2;
+        return 2 + bus.data_waitstates(addr, if b { 1 } else { 4 });
     }
 
     // Load/store halfword imm
@@ -211,7 +213,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         } else {
             bus.write16(addr & !1, cpu.r[rd] as u16);
         }
-        return 2;
+        return 2 + bus.data_waitstates(addr, 2);
     }
 
     // Load/store with register offset — all 0101_xxx forms:
@@ -248,7 +250,12 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             }
             _ => {}
         }
-        return 2;
+        let bytes = match opc {
+            1 | 5 => 2,
+            2 | 3 | 6 | 7 => 1,
+            _ => 4,
+        };
+        return 2 + bus.data_waitstates(addr, bytes);
     }
 
     // Hi register ops / BX — R15 reads as PC+4

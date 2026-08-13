@@ -6,7 +6,7 @@ pub struct Cpsr {
     pub z: bool,
     pub c: bool,
     pub v: bool,
-    /// bits 0-4 mode; we only track USR/SYS/IRQ/SVC/FIQ lightly for now
+    /// bits 0–4: USR/FIQ/IRQ/SVC/ABT/UND/SYS
     pub mode: u8,
     pub thumb: bool,
     pub irq_disable: bool,

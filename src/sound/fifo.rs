@@ -50,7 +50,7 @@ impl Fifo {
             }
             self.samples.push_back(b as i8);
         }
-        if self.samples.len() > 16 {
+        if self.samples.len() >= 16 {
             self.dma_req = false;
         }
     }
@@ -62,7 +62,7 @@ impl Fifo {
             }
             self.samples.push_back(b as i8);
         }
-        if self.samples.len() > 16 {
+        if self.samples.len() >= 16 {
             self.dma_req = false;
         }
     }
@@ -80,7 +80,7 @@ impl Fifo {
                 self.hold_valid = false;
             }
         }
-        if self.samples.len() <= 16 {
+        if self.samples.len() < 16 {
             self.dma_req = true;
         }
     }
@@ -90,14 +90,37 @@ impl Fifo {
         self.hold = 0;
     }
 
-    /// Hardware requests when FIFO has ≤16 samples and is not full.
+    /// Request when below half-full. A 16-sample refill does not immediately
+    /// re-request (avoids a DMA every tick_sound while sitting on 16).
     pub fn needs_dma(&self) -> bool {
         let n = self.samples.len();
-        n < FIFO_CAP && (self.dma_req || n <= 16)
+        n < FIFO_CAP && (self.dma_req || n < 16)
     }
 
     pub fn peek_head(&self, i: usize) -> i8 {
         self.samples.get(i).copied().unwrap_or(0)
+    }
+
+    pub fn samples_vec(&self) -> Vec<i8> {
+        self.samples.iter().copied().collect()
+    }
+
+    pub fn restore(
+        &mut self,
+        samples: &[i8],
+        hold: i8,
+        hold_valid: bool,
+        dma_req: bool,
+        samples_consumed: u64,
+    ) {
+        self.samples.clear();
+        for &s in samples.iter().take(FIFO_CAP) {
+            self.samples.push_back(s);
+        }
+        self.hold = hold;
+        self.hold_valid = hold_valid;
+        self.dma_req = dma_req;
+        self.samples_consumed = samples_consumed;
     }
 }
 
@@ -139,6 +162,18 @@ mod tests {
         for _ in 0..16 {
             f.pop_timer();
         }
+        assert!(!f.needs_dma(), "exactly 16 must not re-request");
+        f.pop_timer();
         assert!(f.needs_dma());
+    }
+
+    #[test]
+    fn sixteen_sample_refill_does_not_rerequest() {
+        let mut f = Fifo::new();
+        for _ in 0..4 {
+            f.push_word(0);
+        }
+        assert_eq!(f.len(), 16);
+        assert!(!f.needs_dma());
     }
 }

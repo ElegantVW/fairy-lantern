@@ -91,12 +91,32 @@ fn dispatch(cpu: &mut Cpu, bus: &mut Bus, num: u8) {
 }
 
 fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
-    // Jump to ROM entry
-    cpu.cpsr.thumb = false;
-    cpu.cpsr.mode = 0x1F;
+    // GBATEK: read 03007FFA first (it lives inside the 200h wipe).
+    let flag = bus.read8(0x0300_7FFA);
+    for i in 0x7E00..0x8000 {
+        if i < bus.iwram.len() {
+            bus.iwram[i] = 0;
+        }
+    }
+    bus.halt_wait = false;
+    bus.intr_wait_mask = 0;
+    for r in cpu.r.iter_mut().take(13) {
+        *r = 0;
+    }
+    cpu.set_mode(0x13);
+    cpu.r[13] = 0x0300_7FE0;
+    cpu.set_mode(0x12);
+    cpu.r[13] = 0x0300_7FA0;
+    cpu.set_mode(0x1F);
     cpu.r[13] = 0x0300_7F00;
-    cpu.set_pc(0x0800_0000);
-    let _ = bus;
+    cpu.cpsr.thumb = false;
+    cpu.cpsr.irq_disable = false;
+    let entry = if flag & 1 != 0 {
+        0x0200_0000
+    } else {
+        0x0800_0000
+    };
+    cpu.set_pc(entry);
 }
 
 fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
@@ -105,7 +125,9 @@ fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
         bus.ewram.fill(0);
     }
     if flags & 0x02 != 0 {
-        bus.iwram.fill(0);
+        // Last 200h of IWRAM holds IRQ vector + SoftReset flag — keep it.
+        let n = bus.iwram.len().min(0x7E00);
+        bus.iwram[..n].fill(0);
     }
     if flags & 0x04 != 0 {
         bus.pal.fill(0);
@@ -542,6 +564,48 @@ fn obj_affine_set(cpu: &mut Cpu, bus: &mut Bus) {
         bus.write16(dst.wrapping_add(offset * 3), pd);
         src = src.wrapping_add(8);
         dst = dst.wrapping_add(offset);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cart::Cart;
+
+    fn harness() -> (Cpu, Bus) {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        (Cpu::new(), Bus::new(&cart, None))
+    }
+
+    #[test]
+    fn ram_reset_keeps_irq_vector() {
+        let (mut cpu, mut bus) = harness();
+        bus.write32(0x0300_7FFC, 0x0800_1234);
+        bus.write8(0x0300_1000, 0xAB);
+        cpu.r[0] = 0x02;
+        register_ram_reset(&mut cpu, &mut bus);
+        assert_eq!(bus.read8(0x0300_1000), 0);
+        assert_eq!(bus.read32(0x0300_7FFC), 0x0800_1234);
+    }
+
+    #[test]
+    fn soft_reset_honors_ram_boot_flag() {
+        let (mut cpu, mut bus) = harness();
+        bus.write8(0x0300_7FFA, 1);
+        cpu.r[0] = 0xDEAD;
+        soft_reset(&mut cpu, &mut bus);
+        assert_eq!(cpu.pc(), 0x0200_0000);
+        assert_eq!(cpu.r[0], 0);
+        assert_eq!(cpu.cpsr.mode & 0x1F, 0x1F);
+        assert_eq!(cpu.r[13], 0x0300_7F00);
+        assert_eq!(bus.read8(0x0300_7FFA), 0, "flag region is wiped");
     }
 }
 

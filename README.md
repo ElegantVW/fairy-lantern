@@ -4,8 +4,7 @@ Light a fable; play a pocket world. A from-scratch Game Boy Advance emulator in
 Rust: own ARM7TDMI core, bus, PPU, and sound path. No mGBA, no libretro cores.
 
 > Independent repo — was part of the faeOS monorepo (`faeos/fairy-lantern`).
-> Worked tree (as of 2026-08-11) includes the uncommitted audio/boot fixes
-> described in [AGENTS.md](AGENTS.md).
+> Accuracy notes and known holes: [docs/AUDIT.md](docs/AUDIT.md).
 
 ## Status
 
@@ -40,7 +39,8 @@ ROMs are user-supplied only (`.gba` / `.zip` containing a `.gba`).
 - BIOS SWI: memory, decompress (LZ/RL/Huff), Div, ArcTan, AffineSet,
   SoundBias, m4a sound-driver family
 - Sound FIFO A/B sinks + DirectSound → host audio (`aplay`/`pw-cat`),
-  1:1 sample path, silence on underrun
+  1:1 sample path (dual-rate: emit at the faster FIFO, hold the slower),
+  silence on underrun
 - PPU Mode 0–5, priority composite, alpha + brightness, WIN0/1 + OBJ window,
   mosaic BG, affine OBJ
 - FLASH1M / FLASH / SRAM battery + savestates + EEPROM bit-bang
@@ -61,10 +61,12 @@ Debug instrumentation is gated behind `FAIRY_DMA_TRACE=1` — see
 
 ```
 cargo test
+fairy-lantern test          # same self-tests as a CLI smoke check
 ```
 
-(tests/ is currently a skeleton; emulator correctness is verified via
-frame-diff/audio runs — see AGENTS.md.)
+Unit tests cover sound FIFO/mixer, ARM `MSR #imm`, timer cascade, FIFO DMA,
+savestate round-trip, and the 32 MiB ROM cap. Commercial-ROM checks are still
+headless `run --frames` (see [AGENTS.md](AGENTS.md)).
 
 ## License
 

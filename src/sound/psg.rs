@@ -138,13 +138,7 @@ impl Psg {
                 w.length = 256u16.saturating_sub(regs.ch3_h & 0xFF);
                 w.length_en = regs.ch3_x & (1 << 14) != 0;
                 w.phase = 0;
-                let n = regs.ch3_x & 0x7FF;
-                let freq = if n < 2048 {
-                    65536u32 / (2048u32 - n as u32).max(1)
-                } else {
-                    0
-                };
-                w.phase_inc = freq_to_inc(freq, rate);
+                w.phase_inc = freq_to_inc(wave_hz(regs.ch3_x), rate);
             }
             4 => trigger_noise(&mut self.noise, regs.ch4_l, regs.ch4_h, rate),
             _ => {}
@@ -183,13 +177,7 @@ impl Psg {
         refresh_square_freq(&mut self.sq1, regs.ch1_x, rate);
         refresh_square_freq(&mut self.sq2, regs.ch2_h, rate);
         {
-            let n = regs.ch3_x & 0x7FF;
-            let freq = if n < 2048 {
-                65536u32 / (2048u32 - n as u32).max(1)
-            } else {
-                0
-            };
-            self.wave.phase_inc = freq_to_inc(freq, rate);
+            self.wave.phase_inc = freq_to_inc(wave_hz(regs.ch3_x), rate);
             self.wave.volume_code = ((regs.ch3_h >> 5) & 3) as u8;
             self.wave.length_en = regs.ch3_x & (1 << 14) != 0;
         }
@@ -240,6 +228,15 @@ fn freq_to_inc(freq_hz: u32, stream_rate: u32) -> u32 {
         return 0;
     }
     ((freq_hz as u64 * 8 * 65536) / stream_rate as u64).min(u32::MAX as u64) as u32
+}
+
+/// GBATEK CH3: rate = 2097152 / (2048 − n) Hz (32-sample wave).
+fn wave_hz(freq_reg: u16) -> u32 {
+    let n = (freq_reg & 0x7FF) as u32;
+    if n >= 2048 {
+        return 0;
+    }
+    2_097_152 / (2048 - n).max(1)
 }
 
 fn square_hz(freq_raw: u16) -> u32 {
@@ -481,5 +478,11 @@ mod tests {
         let mut p = Psg::default();
         let regs = PsgRegs::default();
         assert_eq!(p.sample(&regs, 32768), 0);
+    }
+
+    #[test]
+    fn wave_hz_matches_gbatek() {
+        assert_eq!(wave_hz(0), 2_097_152 / 2048);
+        assert_eq!(wave_hz(1024), 2_097_152 / 1024);
     }
 }
