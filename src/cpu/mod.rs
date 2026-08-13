@@ -678,6 +678,25 @@ mod tests {
     }
 
     #[test]
+    fn mul_i_cycles_follow_rs_magnitude() {
+        // MUL r0, r1, r2  (r2 = Rs)
+        let cart = cart_with(&[0xE000_0291]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        cpu.r[1] = 3;
+        cpu.r[2] = 0x10; // fits in 8 bits → 1 I
+        cpu.set_pc(0x0300_0000);
+        bus.write32(0x0300_0000, 0xE000_0291);
+        let c8 = cpu.step(&mut bus);
+        cpu.r[2] = 0x1_0000; // needs 3 I
+        cpu.set_pc(0x0300_0000);
+        let c24 = cpu.step(&mut bus);
+        assert!(c24 > c8, "wider Rs costs more I-cycles");
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
     fn data_proc_reg_shift_costs_extra_cycle() {
         // MOV r0, r1, LSL r2  vs  MOV r0, r1
         let cart = cart_with(&[0xE1A0_0211, 0xE1A0_0001]);

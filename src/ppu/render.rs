@@ -567,7 +567,7 @@ fn composite_affine_bg(
     affine: AffineRefs,
     bus: &Bus,
     bg: u16,
-    _y: usize,
+    y: usize,
     win_mask: &[u8; WIDTH],
     top: &mut [Slot; WIDTH],
     bot: &mut [Slot; WIDTH],
@@ -601,19 +601,27 @@ fn composite_affine_bg(
     } else {
         (pa, pc)
     };
-    let _ = (pb, pd);
-    let (mut rx, mut ry) = if bg == 2 {
+    let mosaic = cnt & (1 << 6) != 0;
+    let (mos_x, mos_y) = mosaic_size(bus);
+    let (mut rx0, mut ry0) = if bg == 2 {
         (affine.0, affine.1)
     } else {
         (affine.2, affine.3)
     };
+    if mosaic && mos_y > 1 {
+        let yq = y / mos_y * mos_y;
+        let dy = y as i32 - yq as i32;
+        rx0 = rx0.wrapping_sub(dy.wrapping_mul(pb));
+        ry0 = ry0.wrapping_sub(dy.wrapping_mul(pd));
+    }
     let map_pix = dim * 8;
     let wrap = cnt & (1 << 13) != 0;
 
     for x in 0..WIDTH {
+        let xq = if mosaic { x / mos_x * mos_x } else { x };
+        let rx = rx0.wrapping_add((xq as i32).wrapping_mul(pa));
+        let ry = ry0.wrapping_add((xq as i32).wrapping_mul(pc));
         if win_mask[x] & layer_bit == 0 {
-            rx = rx.wrapping_add(pa);
-            ry = ry.wrapping_add(pc);
             continue;
         }
         let mut sx = rx >> 8;
@@ -622,8 +630,6 @@ fn composite_affine_bg(
             sx = sx.rem_euclid(map_pix as i32);
             sy = sy.rem_euclid(map_pix as i32);
         } else if sx < 0 || sy < 0 || sx >= map_pix as i32 || sy >= map_pix as i32 {
-            rx = rx.wrapping_add(pa);
-            ry = ry.wrapping_add(pc);
             continue;
         }
         let tx = sx as usize / 8;
@@ -647,8 +653,6 @@ fn composite_affine_bg(
                 },
             );
         }
-        rx = rx.wrapping_add(pa);
-        ry = ry.wrapping_add(pc);
     }
 }
 

@@ -132,7 +132,8 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         if s {
             cpu.cpsr.set_nz(result);
         }
-        return 2;
+        // 1S + mI; m from the magnitude of Rs (GBATEK / ARM7TDMI).
+        return 1 + mul_i_cycles(cpu.r[rs]);
     }
 
     // Long multiply: xxxx0000_1UAS_...._1001  (UMULL/UMLAL/SMULL/SMLAL)
@@ -218,6 +219,18 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     // Unknown — soft NOP
     cpu.note_unknown(op, false);
     1
+}
+
+fn mul_i_cycles(rs: u32) -> u32 {
+    if rs & 0xFFFF_FF00 == 0 || rs & 0xFFFF_FF00 == 0xFFFF_FF00 {
+        1
+    } else if rs & 0xFFFF_0000 == 0 || rs & 0xFFFF_0000 == 0xFFFF_0000 {
+        2
+    } else if rs & 0xFF00_0000 == 0 || rs & 0xFF00_0000 == 0xFF00_0000 {
+        3
+    } else {
+        4
+    }
 }
 
 fn apply_msr(cpu: &mut Cpu, spsr: bool, field_mask: u32, v: u32) {

@@ -203,6 +203,7 @@ fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
     if flags & 0x40 != 0 {
         // Sound
         zero_io(bus, 0x060, 0x0A8);
+        bus.write16_raw(0x0400_0088, 0x0200); // SOUNDBIAS
     }
     if flags & 0x80 != 0 {
         // All other IO (not CPU regs). Leave KEYINPUT 0x130 — it's the pad latch.
@@ -211,6 +212,12 @@ fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
         zero_io(bus, 0x100, 0x10F); // timers
         zero_io(bus, 0x132, 0x133); // KEYCNT
         zero_io(bus, 0x200, 0x208); // IE/IF/WAITCNT/IME
+        // Real BIOS leaves forced-blank DISPCNT and identity affine, not 0.
+        bus.write16_raw(0x0400_0000, 0x0080);
+        bus.write16_raw(0x0400_0020, 0x0100);
+        bus.write16_raw(0x0400_0026, 0x0100);
+        bus.write16_raw(0x0400_0030, 0x0100);
+        bus.write16_raw(0x0400_0036, 0x0100);
     }
 }
 
@@ -253,26 +260,26 @@ fn intr_wait(cpu: &mut Cpu, bus: &mut Bus) {
 }
 
 fn div(cpu: &mut Cpu) {
-    let num = cpu.r[0] as i32;
-    let den = cpu.r[1] as i32;
-    if den == 0 {
-        cpu.r[0] = 0;
-        cpu.r[1] = 0;
-        cpu.r[3] = 0;
-        return;
-    }
-    let q = num / den;
-    let r = num % den;
-    cpu.r[0] = q as u32;
-    cpu.r[1] = r as u32;
-    cpu.r[3] = q.unsigned_abs();
+    apply_div(cpu, cpu.r[0] as i32, cpu.r[1] as i32);
 }
 
 fn div_arm(cpu: &mut Cpu) {
-    // r1 / r0 → r0=quot r1=rem r3=abs(quot)  (swapped args vs Div)
-    let num = cpu.r[1] as i32;
-    let den = cpu.r[0] as i32;
+    apply_div(cpu, cpu.r[1] as i32, cpu.r[0] as i32);
+}
+
+fn apply_div(cpu: &mut Cpu, num: i32, den: i32) {
     if den == 0 {
+        // BIOS does not return 0/0/0; games that poll after a bad Div
+        // expect ±1 / numerator / 1 (mGBA / GBATEK notes).
+        cpu.r[0] = if num < 0 { (-1i32) as u32 } else { 1 };
+        cpu.r[1] = num as u32;
+        cpu.r[3] = 1;
+        return;
+    }
+    if den == -1 && num == i32::MIN {
+        cpu.r[0] = i32::MIN as u32;
+        cpu.r[1] = 0;
+        cpu.r[3] = i32::MIN as u32;
         return;
     }
     let q = num / den;
@@ -551,46 +558,104 @@ fn rl_uncomp(cpu: &mut Cpu, bus: &mut Bus, to_vram: bool) {
     }
 }
 
-/// SWI 0x09 ArcTan — r0 = tan (16.16) → r0 = angle
+/// SWI 0x09 ArcTan — BIOS polynomial (mGBA / GBATEK), r0 in, r0 = angle.
 fn arctan(cpu: &mut Cpu) {
-    let t = (cpu.r[0] as i32) as f64 / 65536.0;
-    let a = t.atan();
-    // Return in BIOS-ish fixed point (approx)
-    cpu.r[0] = (a * 65536.0 / std::f64::consts::FRAC_PI_2 * 0x4000 as f64) as i32 as u32;
+    cpu.r[0] = bios_arctan(cpu.r[0] as i32) as u32;
 }
 
-/// SWI 0x0A ArcTan2 — r0=x, r1=y → r0=angle
+/// SWI 0x0A ArcTan2 — r0=x, r1=y → r0=angle (low 16 bits).
 fn arctan2(cpu: &mut Cpu) {
-    let x = (cpu.r[0] as i32) as f64;
-    let y = (cpu.r[1] as i32) as f64;
-    let a = y.atan2(x);
-    cpu.r[0] = (a * 65536.0 / std::f64::consts::PI * 0x8000 as f64) as i32 as u32;
+    cpu.r[0] = bios_arctan2(cpu.r[0] as i32, cpu.r[1] as i32) as u16 as u32;
+}
+
+fn bios_arctan(i: i32) -> i32 {
+    let a = -((i.wrapping_mul(i)) >> 14);
+    let mut b = ((0xA9 * a) >> 14) + 0x390;
+    b = ((b * a) >> 14) + 0x91C;
+    b = ((b * a) >> 14) + 0xFB6;
+    b = ((b * a) >> 14) + 0x16AA;
+    b = ((b * a) >> 14) + 0x2081;
+    b = ((b * a) >> 14) + 0x3651;
+    b = ((b * a) >> 14) + 0xA2F9;
+    (i * b) >> 16
+}
+
+fn bios_arctan2(x: i32, y: i32) -> i32 {
+    if y == 0 {
+        return if x >= 0 { 0 } else { 0x8000 };
+    }
+    if x == 0 {
+        return if y >= 0 { 0x4000 } else { 0xC000 };
+    }
+    if y >= 0 {
+        if x >= 0 {
+            if x >= y {
+                return bios_arctan((y << 14) / x);
+            }
+        } else if -x >= y {
+            return bios_arctan((y << 14) / x) + 0x8000;
+        }
+        return 0x4000 - bios_arctan((x << 14) / y);
+    }
+    if x <= 0 {
+        if -x > -y {
+            return bios_arctan((y << 14) / x) + 0x8000;
+        }
+    } else if x >= -y {
+        return bios_arctan((y << 14) / x) + 0x1_0000;
+    }
+    0xC000 - bios_arctan((x << 14) / y)
+}
+
+/// 8.8 sine, 256 steps per turn (`angle >> 8`). cos = sin(x + 64).
+const SIN8: [i16; 256] = [
+       0,    6,   13,   19,   25,   31,   38,   44,   50,   56,   62,   68,   74,   80,   86,   92,
+      98,  104,  109,  115,  121,  126,  132,  137,  142,  147,  152,  157,  162,  167,  172,  177,
+     181,  185,  190,  194,  198,  202,  206,  209,  213,  216,  220,  223,  226,  229,  231,  234,
+     237,  239,  241,  243,  245,  247,  248,  250,  251,  252,  253,  254,  255,  255,  256,  256,
+     256,  256,  256,  255,  255,  254,  253,  252,  251,  250,  248,  247,  245,  243,  241,  239,
+     237,  234,  231,  229,  226,  223,  220,  216,  213,  209,  206,  202,  198,  194,  190,  185,
+     181,  177,  172,  167,  162,  157,  152,  147,  142,  137,  132,  126,  121,  115,  109,  104,
+      98,   92,   86,   80,   74,   68,   62,   56,   50,   44,   38,   31,   25,   19,   13,    6,
+       0,   -6,  -13,  -19,  -25,  -31,  -38,  -44,  -50,  -56,  -62,  -68,  -74,  -80,  -86,  -92,
+     -98, -104, -109, -115, -121, -126, -132, -137, -142, -147, -152, -157, -162, -167, -172, -177,
+    -181, -185, -190, -194, -198, -202, -206, -209, -213, -216, -220, -223, -226, -229, -231, -234,
+    -237, -239, -241, -243, -245, -247, -248, -250, -251, -252, -253, -254, -255, -255, -256, -256,
+    -256, -256, -256, -255, -255, -254, -253, -252, -251, -250, -248, -247, -245, -243, -241, -239,
+    -237, -234, -231, -229, -226, -223, -220, -216, -213, -209, -206, -202, -198, -194, -190, -185,
+    -181, -177, -172, -167, -162, -157, -152, -147, -142, -137, -132, -126, -121, -115, -109, -104,
+     -98,  -92,  -86,  -80,  -74,  -68,  -62,  -56,  -50,  -44,  -38,  -31,  -25,  -19,  -13,   -6,
+];
+
+fn bios_sin_cos(angle: u16) -> (i32, i32) {
+    let i = (angle >> 8) as usize;
+    (SIN8[i] as i32, SIN8[(i + 64) & 255] as i32)
+}
+
+fn mul_88(a: i32, b: i32) -> i32 {
+    ((a * b) >> 8).clamp(-32768, 32767)
 }
 
 /// SWI 0x0E BgAffineSet — src 20B → dst 16B (PA..PD + ref x/y).
-/// sx/sy are 8.8 fixed; with float cos∈[-1,1], PA = cos*sx (8.8). Do **not** /256.
 fn bg_affine_set(cpu: &mut Cpu, bus: &mut Bus) {
     let mut src = cpu.r[0];
     let mut dst = cpu.r[1];
     let count = cpu.r[2];
     for _ in 0..count {
-        // cx,cy: s32 with 8-bit fraction already
-        let cx = bus.read32(src) as i32;
-        let cy = bus.read32(src.wrapping_add(4)) as i32;
+        let ox = bus.read32(src) as i32;
+        let oy = bus.read32(src.wrapping_add(4)) as i32;
         let disp_x = bus.read16(src.wrapping_add(8)) as i16 as i32;
         let disp_y = bus.read16(src.wrapping_add(10)) as i16 as i32;
         let scale_x = bus.read16(src.wrapping_add(12)) as i16 as i32;
         let scale_y = bus.read16(src.wrapping_add(14)) as i16 as i32;
-        let angle = bus.read16(src.wrapping_add(16)) as u32;
-        let th = (angle as f64) * std::f64::consts::TAU / 65536.0;
-        let (s, c) = (th.sin(), th.cos());
-        let pa = clamp_s16(c * scale_x as f64);
-        let pb = clamp_s16(-s * scale_x as f64);
-        let pc = clamp_s16(s * scale_y as f64);
-        let pd = clamp_s16(c * scale_y as f64);
-        // ref = center - display_offset · matrix  (8.8 throughout)
-        let start_x = cx - disp_x * pa - disp_y * pb;
-        let start_y = cy - disp_x * pc - disp_y * pd;
+        let angle = bus.read16(src.wrapping_add(16));
+        let (s, c) = bios_sin_cos(angle);
+        let pa = mul_88(c, scale_x);
+        let pb = mul_88(-s, scale_x);
+        let pc = mul_88(s, scale_y);
+        let pd = mul_88(c, scale_y);
+        let start_x = ox - disp_x * pa - disp_y * pb;
+        let start_y = oy - disp_x * pc - disp_y * pd;
         bus.write16(dst, pa as u16);
         bus.write16(dst.wrapping_add(2), pb as u16);
         bus.write16(dst.wrapping_add(4), pc as u16);
@@ -602,23 +667,21 @@ fn bg_affine_set(cpu: &mut Cpu, bus: &mut Bus) {
     }
 }
 
-/// SWI 0x0F ObjAffineSet — src {sx,sy,angle} → PA..PD every `offset` bytes in OAM.
+/// SWI 0x0F ObjAffineSet — src {sx,sy,angle} → PA..PD every `offset` bytes.
 fn obj_affine_set(cpu: &mut Cpu, bus: &mut Bus) {
     let mut src = cpu.r[0];
     let mut dst = cpu.r[1];
     let count = cpu.r[2];
-    let offset = cpu.r[3].max(2) as u32; // usually 8
+    let offset = cpu.r[3].max(2) as u32;
     for _ in 0..count {
         let scale_x = bus.read16(src) as i16 as i32;
         let scale_y = bus.read16(src.wrapping_add(2)) as i16 as i32;
-        let angle = bus.read16(src.wrapping_add(4)) as u32;
-        let th = (angle as f64) * std::f64::consts::TAU / 65536.0;
-        let (s, c) = (th.sin(), th.cos());
-        // Identity: sx=sy=0x100, angle=0 → PA=PD=0x100 (not 0x1!)
-        let pa = clamp_s16(c * scale_x as f64) as u16;
-        let pb = clamp_s16(-s * scale_x as f64) as u16;
-        let pc = clamp_s16(s * scale_y as f64) as u16;
-        let pd = clamp_s16(c * scale_y as f64) as u16;
+        let angle = bus.read16(src.wrapping_add(4));
+        let (s, c) = bios_sin_cos(angle);
+        let pa = mul_88(c, scale_x) as u16;
+        let pb = mul_88(-s, scale_x) as u16;
+        let pc = mul_88(s, scale_y) as u16;
+        let pd = mul_88(c, scale_y) as u16;
         bus.write16(dst, pa);
         bus.write16(dst.wrapping_add(offset), pb);
         bus.write16(dst.wrapping_add(offset * 2), pc);
@@ -693,10 +756,11 @@ mod tests {
         bus.write16(0x0400_0208, 1);
         register_ram_reset(&mut cpu, &mut bus);
         assert_eq!(cpu.r[1], 0x1122_3344, "bit7 is not a CPU wipe");
-        assert_eq!(bus.read16(0x0400_0000), 0);
-        assert_eq!(bus.read16(0x0400_00BA), 0);
-        assert_eq!(bus.read16(0x0400_0102), 0);
-        assert_eq!(bus.read16(0x0400_0208), 0);
+        assert_eq!(bus.read16(0x0400_0000), 0x0080, "BIOS leaves forced blank");
+        assert_eq!(bus.read16(0x0400_0020), 0x0100, "BG2PA identity");
+        assert_eq!(bus.read16(0x0400_0026), 0x0100, "BG2PD identity");
+        assert_eq!(bus.read16(0x0400_0102), 0, "timer ctrl cleared");
+        assert_eq!(bus.read16(0x0400_0208) & 1, 0, "IME bit0 cleared");
     }
 
     #[test]
@@ -745,11 +809,55 @@ mod tests {
         assert_eq!(cpu.r14_svc, 0);
         assert_eq!(bus.read8(0x0300_7FFA), 0, "flag region is wiped");
     }
-}
 
-#[inline]
-fn clamp_s16(v: f64) -> i32 {
-    v.round().clamp(-32768.0, 32767.0) as i32
+    #[test]
+    fn obj_affine_identity_and_quarter_turn() {
+        let (mut cpu, mut bus) = harness();
+        // sx=sy=0x100, angle=0
+        bus.write16(0x0300_0000, 0x0100);
+        bus.write16(0x0300_0002, 0x0100);
+        bus.write16(0x0300_0004, 0);
+        cpu.r[0] = 0x0300_0000;
+        cpu.r[1] = 0x0700_0006; // OAM PA of slot 0
+        cpu.r[2] = 1;
+        cpu.r[3] = 8;
+        obj_affine_set(&mut cpu, &mut bus);
+        assert_eq!(bus.read16(0x0700_0006), 0x0100, "PA");
+        assert_eq!(bus.read16(0x0700_000E), 0, "PB");
+        assert_eq!(bus.read16(0x0700_0016), 0, "PC");
+        assert_eq!(bus.read16(0x0700_001E), 0x0100, "PD");
+        // 90°: angle 0x4000 → index 64
+        bus.write16(0x0300_0004, 0x4000);
+        obj_affine_set(&mut cpu, &mut bus);
+        assert_eq!(bus.read16(0x0700_0006), 0, "PA cos90");
+        assert_eq!(bus.read16(0x0700_000E) as i16, -256, "PB -sin90");
+        assert_eq!(bus.read16(0x0700_0016) as i16, 256, "PC sin90");
+        assert_eq!(bus.read16(0x0700_001E), 0, "PD cos90");
+    }
+
+    #[test]
+    fn div_by_zero_matches_bios_shape() {
+        let (mut cpu, _bus) = harness();
+        cpu.r[0] = 10;
+        cpu.r[1] = 0;
+        div(&mut cpu);
+        assert_eq!(cpu.r[0], 1);
+        assert_eq!(cpu.r[1], 10);
+        assert_eq!(cpu.r[3], 1);
+        cpu.r[0] = (-4i32) as u32;
+        cpu.r[1] = 0;
+        div(&mut cpu);
+        assert_eq!(cpu.r[0], (-1i32) as u32);
+        assert_eq!(cpu.r[1], (-4i32) as u32);
+    }
+
+    #[test]
+    fn arctan2_axes() {
+        assert_eq!(bios_arctan2(100, 0), 0);
+        assert_eq!(bios_arctan2(-100, 0), 0x8000);
+        assert_eq!(bios_arctan2(0, 100), 0x4000);
+        assert_eq!(bios_arctan2(0, -100), 0xC000);
+    }
 }
 
 // Sound driver SWIs are now implemented in src/sound/bios.rs
