@@ -206,6 +206,10 @@ mod tests {
         }
         let mut emu = crate::emu::Emu::from_path(rom, None).expect("load LC ROM");
         crate::savestate::load(&mut emu, st).expect("load fight state");
+        if emu.bus.pal.iter().all(|&b| b == 0) {
+            // Live slot was overwritten (e.g. black summary). Not a fight fixture.
+            return;
+        }
         render::render_scanline(&emu.bus, 89, &mut emu.ppu.frame);
         let px = emu.ppu.frame[89 * WIDTH + 160];
         assert_ne!(

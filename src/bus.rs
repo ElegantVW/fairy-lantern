@@ -510,7 +510,17 @@ impl Bus {
                 return v;
             }
         }
-        u16::from_le_bytes([self.read8(a), self.read8(a.wrapping_add(1))])
+        let v = u16::from_le_bytes([self.read8(a), self.read8(a.wrapping_add(1))]);
+        // Game Pak is a 16-bit bus. After a halfword fetch/load the 32-bit
+        // data bus holds that halfword in *both* halves (GBATEK open bus).
+        // FRLG/LC call DestroySpriteAndFreeResources(NULL) on first markings
+        // sprite; they LDRB inUse from 0000003E. A stale high halfword with
+        // bit0 set made that look in-use and the tile-free loop never ended.
+        if matches!(a >> 24, 0x08 | 0x09 | 0x0A | 0x0B | 0x0C) {
+            let d = v as u32;
+            self.last_bus.set(d | (d << 16));
+        }
+        v
     }
 
     pub fn write32_raw(&mut self, addr: u32, val: u32) {
@@ -1392,6 +1402,30 @@ mod tests {
             inner_name: None,
         };
         Bus::new(&cart, None)
+    }
+
+    #[test]
+    #[test]
+    fn rom_halfword_open_bus_duplicates_on_both_halves() {
+        let mut data = vec![0u8; 0x200];
+        data[0..2].copy_from_slice(&0x7801u16.to_le_bytes());
+        let cart = Cart {
+            data,
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut bus = Bus::new(&cart, Some(vec![0xEA; BIOS_SIZE]));
+        bus.exec_pc = 0x0800_0000;
+        assert_eq!(bus.read16(0x0800_0000), 0x7801);
+        // Thumb prefetch open bus: 7801_7801. Lane of 0000003E is byte2 = 01.
+        assert_eq!(bus.read8(0x0000_003C), 0x01);
+        assert_eq!(bus.read8(0x0000_003D), 0x78);
+        assert_eq!(bus.read8(0x0000_003E), 0x01);
+        assert_eq!(bus.read8(0x0000_003F), 0x78);
+        assert_eq!(bus.read32(0x0000_000C), 0x7801_7801);
     }
 
     #[test]
