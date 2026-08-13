@@ -89,6 +89,7 @@ Plus (not in the original list):
 - Same-priority OBJ order — **Fixed** (low OAM index in front; Gen3 HP bars).
 - Flash AMD erase 80+AA/55+10/30 — **Fixed**.
 - Host catch-up spiral (up to 6 frames, never recovered) — **Fixed** (1 extra if ring starving).
+- OBJ scanline cycle budget (~1210) — **Fixed** (OAM 0→127; leftovers dropped).
 - Gamepad / `KEYINPUT` from a host controller — **Deferred**. Keyboard only
   (`play::poll_keys`). minifb has no pad API. When LC’s campaign gate is done,
   map gilrs/evdev onto the same 10 bits; keep keys; no analog into KEYINPUT.

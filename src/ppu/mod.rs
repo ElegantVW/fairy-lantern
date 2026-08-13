@@ -292,6 +292,29 @@ mod tests {
     }
 
     #[test]
+    fn obj_cycle_limit_drops_high_oam() {
+        // 64×8 costs 33 cycles; 37 of them exceed 1210. OAM 40 must not draw.
+        let mut bus = empty_bus();
+        bus.write16(0x0400_0000, (1 << 12) | (1 << 6));
+        put_obj_tile_solid(&mut bus, 0, 1);
+        bus.pal[0x200 + 2] = 0x1F;
+        bus.pal[0x200 + 3] = 0x00;
+        bus.pal[0x200 + 4] = 0xE0;
+        bus.pal[0x200 + 5] = 0x03;
+        // 64×32: cost 33 each. 37 exceed 1210, so OAM ≥36 is dropped.
+        for i in 0..40 {
+            oam_sprite(&mut bus, i, 20, 1 << 6, 4, 3 << 6, 0);
+        }
+        // OAM 40: 8×8 green at x=80 — past the budget
+        put_obj_tile_solid(&mut bus, 8, 2);
+        oam_sprite(&mut bus, 40, 20, 0, 80, 0, 8);
+        let mut frame = vec![0u16; WIDTH * HEIGHT];
+        render::render_scanline(&bus, 20, &mut frame);
+        let px = frame[20 * WIDTH + 82];
+        assert_eq!(px & 0x7FFF, 0, "OAM 40 must be dropped by the line budget, got {px:04X}");
+    }
+
+    #[test]
     fn obj_64x32_healthbox_is_visible() {
         let mut bus = empty_bus();
         bus.write16(0x0400_0000, (1 << 12) | (1 << 6));

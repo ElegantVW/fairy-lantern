@@ -698,6 +698,50 @@ fn mode5_into(bus: &Bus, y: usize, dispcnt: u16, top: &mut [Slot; WIDTH]) {
 
 // ── Sprites ──────────────────────────────────────────────────────────
 
+/// GBATEK: ~1210 cycles of OBJ work per scanline. OAM is walked 0→127;
+/// when the budget is gone, later sprites are not drawn.
+const OBJ_LINE_CYCLES: u32 = 1210;
+
+fn obj_cycle_allow(bus: &Bus, y: usize) -> [bool; 128] {
+    let mut allow = [false; 128];
+    let mut used = 0u32;
+    for i in 0..128 {
+        let o = i * 8;
+        let attr0 = oam_u16(bus, o);
+        let attr1 = oam_u16(bus, o + 2);
+        let affine = attr0 & (1 << 8) != 0;
+        let dbl_or_dis = attr0 & (1 << 9) != 0;
+        if !affine && dbl_or_dis {
+            used = used.saturating_add(1);
+            continue;
+        }
+        let shape = (attr0 >> 14) & 3;
+        let size = (attr1 >> 14) & 3;
+        let (ow, oh) = obj_dims(shape, size);
+        let double = affine && dbl_or_dis;
+        let dh = if double { oh * 2 } else { oh };
+        let dw = if double { ow * 2 } else { ow };
+        let oy = attr0 & 0xFF;
+        let y0 = if oy >= 160 { oy as i32 - 256 } else { oy as i32 };
+        let on = (y as i32) >= y0 && (y as i32) < y0 + dh as i32;
+        let cost = if !on {
+            1
+        } else if affine {
+            10 + dw as u32
+        } else {
+            1 + (ow as u32 / 2).max(1)
+        };
+        if used.saturating_add(cost) > OBJ_LINE_CYCLES {
+            break;
+        }
+        used += cost;
+        if on {
+            allow[i] = true;
+        }
+    }
+    allow
+}
+
 fn composite_sprites(
     bus: &Bus,
     y: usize,
@@ -710,11 +754,15 @@ fn composite_sprites(
     let map_2d = !one_d;
     const OBJ_BIT: u8 = 1 << 4;
     let (obj_mos_x, obj_mos_y) = obj_mosaic_size(bus);
+    let allow = obj_cycle_allow(bus, y);
 
     // Draw back-to-front by priority so put_layer gets correct top/bot.
     // Within same prio, lower OAM index is in front (GBATEK).
     for prio in (0..4u8).rev() {
         for i in (0..128).rev() {
+            if !allow[i] {
+                continue;
+            }
             let o = i * 8;
             let attr0 = oam_u16(bus, o);
             let attr1 = oam_u16(bus, o + 2);
