@@ -748,6 +748,23 @@ mod tests {
     }
 
     #[test]
+    fn thumb_ldrh_unaligned_rors() {
+        // LDRH r0, [r1, #0]
+        let mut mem = vec![0u8; 0x100];
+        mem[0..2].copy_from_slice(&0x8808u16.to_le_bytes());
+        let cart = cart_with(&[]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.iwram[..mem.len()].copy_from_slice(&mem);
+        bus.write16(0x0300_0010, 0x1234);
+        cpu.cpsr.thumb = true;
+        cpu.r[1] = 0x0300_0011;
+        cpu.set_pc(0x0300_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[0], 0x3400_0012, "Thumb unaligned LDRH is 32-bit ROR 8");
+    }
+
+    #[test]
     fn ldrsh_unaligned_is_ldrsb() {
         // LDRSH r0, [r1]
         let cart = cart_with(&[0xE1D1_00F0]);

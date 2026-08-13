@@ -209,7 +209,12 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         let rd = (op & 7) as usize;
         let addr = cpu.r[rb].wrapping_add(imm);
         if l {
-            cpu.r[rd] = bus.read16(addr & !1) as u32;
+            let hw = bus.read16(addr & !1) as u32;
+            cpu.r[rd] = if addr & 1 != 0 {
+                hw.rotate_right(8)
+            } else {
+                hw
+            };
         } else {
             bus.write16(addr & !1, cpu.r[rd] as u16);
         }

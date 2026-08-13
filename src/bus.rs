@@ -49,6 +49,8 @@ pub struct Bus {
     /// Last instruction-fetch address (for N vs S waitstates).
     last_fetch: Cell<u32>,
     last_fetch_ok: Cell<bool>,
+    /// Game Pak prefetch halfwords waiting (0..=8).
+    prefetch_halfs: Cell<u8>,
     /// BIOS IntrWait / Halt: run until these IF bits appear (or VBlank)
     pub halt_wait: bool,
     pub intr_wait_mask: u16,
@@ -108,6 +110,7 @@ impl Bus {
             last_bus: Cell::new(0),
             last_fetch: Cell::new(0),
             last_fetch_ok: Cell::new(false),
+            prefetch_halfs: Cell::new(0),
             halt_wait: false,
             intr_wait_mask: 0,
             hle_bios,
@@ -827,6 +830,12 @@ impl Bus {
         }
     }
 
+    /// Cart data (CPU or DMA) uses the Game Pak bus: next fetch is N, prefetch dies.
+    pub fn note_cart_data(&self) {
+        self.last_fetch_ok.set(false);
+        self.prefetch_halfs.set(0);
+    }
+
     /// Instruction-fetch waitstates beyond the 1 I-cycle baseline.
     /// Sequential if `pc` is last_fetch+2 or +4 in the same region; else N-cycle.
     pub fn fetch_waitstates(&self, pc: u32) -> u32 {
@@ -837,19 +846,28 @@ impl Bus {
         self.last_fetch.set(pc);
         self.last_fetch_ok.set(true);
 
+        let prefetch_on = self.read16(0x0400_0204) & (1 << 14) != 0;
         match pc >> 24 {
-            0x00 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07 => 0,
+            0x00 | 0x03 | 0x04 | 0x05 | 0x06 | 0x07 => {
+                if prefetch_on {
+                    let n = self.prefetch_halfs.get();
+                    self.prefetch_halfs.set((n + 1).min(8));
+                }
+                0
+            }
             0x02 => 2, // EWRAM: +2 on 16/32-bit
             0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
                 let (n_cycles, s_cycles) = self.rom_ns(pc);
-                let prefetch = self.read16(0x0400_0204) & (1 << 14) != 0;
                 let total: u32 = if sequential {
-                    if prefetch {
+                    if prefetch_on {
+                        // I-cycle hides one S=1 fetch; keep a halfword queued.
+                        self.prefetch_halfs.set(1);
                         1
                     } else {
                         s_cycles
                     }
                 } else {
+                    self.prefetch_halfs.set(0);
                     n_cycles
                 };
                 total.saturating_sub(1)
@@ -894,6 +912,9 @@ impl Bus {
 
     /// Extra cycles on a data access (beyond the 1 I-cycle the insn already counted).
     pub fn data_waitstates(&self, addr: u32, bytes: u32) -> u32 {
+        if matches!(addr >> 24, 0x08..=0x0D) {
+            self.note_cart_data();
+        }
         match addr >> 24 {
             0x00 | 0x03 | 0x04 => 0,
             0x02 => {
@@ -1084,6 +1105,25 @@ mod tests {
         assert_eq!(s, 1, "S-cycle extra");
         assert_eq!(n2, 3, "taken branch is N again");
         assert!(s < n);
+    }
+
+    #[test]
+    fn rom_data_access_breaks_sequential_fetch() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let bus = Bus::new(&cart, None);
+        let n = bus.fetch_waitstates(0x0800_0000);
+        let s = bus.fetch_waitstates(0x0800_0004);
+        let _ = bus.data_waitstates(0x0800_0100, 4);
+        let after = bus.fetch_waitstates(0x0800_0008);
+        assert_eq!(s, 1);
+        assert_eq!(after, n, "LDR from ROM must make the next fetch an N-cycle");
     }
 
     #[test]

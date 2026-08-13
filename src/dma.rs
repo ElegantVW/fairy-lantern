@@ -257,6 +257,9 @@ fn run_transfer(bus: &mut Bus, ch: usize, c: &mut Channel) {
     };
 
     for _ in 0..count {
+        if matches!(src >> 24, 0x08..=0x0D) {
+            bus.note_cart_data();
+        }
         if word {
             let v = bus.read32(src & !3);
             bus.write32(dst & !3, v);
