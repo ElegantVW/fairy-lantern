@@ -1,57 +1,60 @@
 # Sound-systems audit
 
-**Date:** 2026-08-13  
-**Tree:** independent `fairy-lantern` after fix waves 1–2  
+**Original date:** 2026-08-13  
+**Current as of:** 2026-08-13, `7816e1b` / tag `sacred/sound-working`  
+**Tree:** independent `fairy-lantern`  
 **Scope:** DirectSound FIFOs, DMA refill, sample timer, mixer, PSG, m4a BIOS HLE, host pipe, capture/WAV.
 
-### Sound fix wave (same day)
-
-Landed after this audit; numbered items below stay as written history:
-
-1. `stream_rate = GBA_CLOCK / cps_out`. Dual-rate emits at the faster tick; slower FIFO holds.
-2. `timer_cps_rate` no longer rejects periods outside 256–4096.
-3. PSG ticks on a 32768 Hz accumulator; CH3 uses `2097152/(2048−n)`; emit window averages ticks.
-4. FIFO `dma_req` clears at `len >= 16`; `needs_dma` is `n < 16`.
-5. `SoundDriverMain` / vsync / channel-clear are stubs (no fake IWRAM PCM).
-6. Tests: dual-rate rate identity, slow timer, 16-sample no re-request, PCM fixture, wave Hz.
-
-Cross-check: GBATEK sound chapter; `src/sound/*`; `bus::tick_sound`; `dma::on_fifo_request`; `play.rs` pacing; Liquid Crystal 400-frame headless run.
+Numbered findings below are the first-pass write-up. Many are done. Use the
+status table and the current path, not the old P0 labels.
 
 ---
 
-## Verdict
+## Verdict (current)
 
-The path that Liquid Crystal actually uses — **ROM mixer → FIFO A/B → timer pop → mono mix → capture** — works. The old 3-tone drone was a boot hang, not a FIFO bug.
+Liquid Crystal’s path — **ROM “Smsh” mixer → IWRAM pcmBuffer → DMA1/2 FIFO →
+timer pop → dest-both mix → 32768 Hz hold → 48 kHz `pw-cat`** — is listenable.
+The 3-tone drone was a boot hang. The looping star / later mush was ARM
+`STRB [Rn, Rm]` writing reverb to `r5+6` instead of the left buffer at `+1584`.
 
-Everything the README implies beyond that is either unproven or wrong:
+This is a working **ROM-mixer DirectSound player**, not a complete GBA APU:
 
-- “Dual-rate FIFO” is implemented as two pop clocks, but the **output rate advertisement disagrees with the emit period** when A and B differ. Host will underrun or race.
-- PSG exists but is clocked and pitched incorrectly. LC intro did not use it (`from_psg=0`).
-- m4a BIOS SWIs are a guessed stub, not MP2K. LC does not call them.
-
-Treat this as a **single-rate DirectSound player for ROM-side mixers**, not a complete GBA APU.
+- PSG exists (32768 Hz accum, CH3 formula) but LC intro never used it (`from_psg=0`).
+- BIOS m4a SWIs are stubs (no fake IWRAM). LC does not call them.
+- Wave 64-sample bank and `SOUNDCNT_X` bits 0–3 are still missing.
 
 ---
 
-## Signal path
+## Signal path (current)
 
 ```
-ROM / IWRAM mixer  (LC: "Smsh" driver + IWRAM decoder @ 0x03002BD4)
+ROM / IWRAM mixer  (LC: "Smsh" @ SoundInfo 0x03005F50, mix @ 0x030028E1)
+        │  12 × 64-byte SoundChannel @ 0x03005FA0
+        │  pcmBuffer right 0x030062A0, left +1584 (PCM_DMA_BUF_SIZE)
         │
-        │  DMA1 → FIFO A (0x040000A0)
-        │  DMA2 → FIFO B (0x040000A4)
-        │  special timing, 4 words (16 samples) per request
+        │  DMA1 → FIFO A (0x040000A0)   SAD = 0x030062A0
+        │  DMA2 → FIFO B (0x040000A4)   SAD = 0x030068D0
+        │  special timing, 4 words (16 samples) per half-empty
+        │  m4aSoundVSync rewinds SAD every pcmDmaPeriod (7) VBlanks
         ▼
   Fifo  32 × signed 8-bit
-        │  pop when derived Timer0/1 period elapses
+        │  pop on Timer0/1 overflow (~13379 Hz on BPRE)
         ▼
-  Mixer::step  →  mix_sample(A + B + PSG) → mono i16
+  Mixer::step
+        │  dest bits enable A/B per speaker (LC dest-both = mono sum)
+        │  50% = sample<<1, 100% = sample<<2; SOUNDBIAS 0x200, clip 0..0x3FF
+        │  emit at 32768 Hz, holding last FIFO byte between pops
         │
-        ├─ SampleRing  →  host thread → aplay / pw-cat @ stream_rate
-        └─ Capture     →  dump_wav (/tmp/fairy-lantern-audio.wav)
+        ├─ SampleRing → pw-cat (else aplay) @ 48 kHz stereo
+        │    prebuffer ~125 ms; underrun = silence (no hold-last)
+        └─ Capture → /tmp/fairy-lantern-audio.wav (48 kHz stereo)
 ```
 
-BIOS SWIs `0x1A`–`0x2B` (`sound/bios.rs`) sit **beside** this path. They try to write a PCM buffer in IWRAM for DMA to pick up. Liquid Crystal never enters them.
+BIOS SWIs `0x1A`–`0x2B` sit **beside** this path and must not write IWRAM.
+Liquid Crystal never enters them.
+
+`FAIRY_DS=a|b` isolates one FIFO. `FAIRY_AUDIO=sine` replaces the mix.
+`FAIRY_MIX_STAT=1` dumps A/B stats + 12 channels + DMA src every 25 frames.
 
 ---
 
@@ -59,41 +62,87 @@ BIOS SWIs `0x1A`–`0x2B` (`sound/bios.rs`) sit **beside** this path. They try t
 
 | Piece | Why |
 |---|---|
-| FIFO size / LE push | 32 samples; `push_word` is little-endian; unit-tested |
-| Special DMA | DMA1/2, dest forced to FIFO A/B, 4 words, reload on enable 0→1, repeat |
-| Half-empty refill | `tick_sound` calls `on_fifo_request` when `dma_req` is set — not HBlank-only |
-| Underrun | `hold_valid=false`, output 0 — no sticky SFX loop |
-| BPRE timer math | `(0x10000-reload)*prescale = 1254` → ~13379 Hz (`timer_rate_13378ish`) |
-| SOUNDCNT_H | dest enable, 50/100% vol, timer select bits, write-1 reset 11/15 |
+| FIFO size / LE push | 32 samples; `push_word` little-endian; unit-tested |
+| Special DMA | DMA1/2, dest forced to FIFO A/B, 4 words, reload SAD on enable 0→1, repeat |
+| Half-empty refill | `tick_sound` → `on_fifo_request` when `len < 16` |
+| Underrun | `hold_valid=false` → 0; host also inserts silence |
+| BPRE timer math | `(0x10000-reload)*prescale = 1254` → ~13379 Hz |
+| SOUNDCNT_H | dest enable, 50/100%, timer select, write-1 reset 11/15 |
 | SOUNDCNT_X bit 7 | master mute |
-| Capture | rolling buffer; headless `run` always dumps a WAV |
+| SOUNDBIAS | `bias_out`: add 0x200, clip 10-bit, scale to i16 |
+| Addressing mode 2 | `STRB [r5, r6]` writes `r5+r6` (reverb left buffer) |
+| Host | device opened once; 48 kHz stereo; no rate-change reopen |
+| Capture | headless `run` always dumps a WAV |
 
 ---
 
-## Liquid Crystal evidence (400 frames, release)
+## Liquid Crystal evidence (`sacred/sound-working`, 450 frames)
 
 ROM: user-supplied BPRE, not in repo.
 
 | Metric | Value |
 |---|---|
-| cycles | 112,356,068 (expected 112,358,400) |
-| pc | `0x03002C38` (IWRAM stream decoder) |
+| cycles | 126,400,555 (expected 126,403,200) |
+| pc | `0x03002C50` (IWRAM mixer) |
 | `unk_ops` / `swi_unk` | 0 / 0 |
-| FIFO out / from_fifo | 89,766 / 178,442 |
-| peak | 10944 |
-| `stream_rate` | 13378 Hz |
+| ident / period / rev / ch | `Smsh`, pcmDmaPeriod=7, reverb=50, 12 channels |
+| A peak / mean / rail | 30–57 / 6–12 / 0 |
+| B peak / mean / rail | 15–71 / 6–13 / 0 (was ±128 before the STRB fix) |
+| host emit | 32768 Hz hold, dump 48 kHz stereo, peak ~7200, no i16 rail |
 | `from_psg` | **0** |
 
-A leftover `/tmp/fairy-lantern-audio.wav` from this machine was **tagged 32768 Hz**, 164205 frames, peak 10944. The header rate is whatever `stream_rate` was at dump time; the capture is a flat i16 stream that may have been produced at a different `cps_out`. Do not use that file as a golden.
+**Proved:** ROM mixer + both FIFOs + dest-both + live `pw-cat` + intro music.  
+**Not proved:** PSG, BIOS m4a SWIs, dual-timer A/B at different rates, cries/fights.
 
-**Proved:** ROM mixer + one FIFO rate + capture.  
-**Not proved:** dual-rate, PSG, m4a SWI, live `aplay` pipe.
+Do not use pre-checkpoint `/tmp/fairy-lantern-audio.wav` files as goldens.
 
 ---
 
-## Findings
+## Finding status
 
-Severity: **P0** = wrong on any title that is not “one FIFO rate, ROM mixer” · **P1** = you will hear it · **P2** = engineering · **P3** = nit.
+| # | Topic | Status |
+|---|---|---|
+| 1 | `cps_out` vs `stream_rate` when A≠B | **Superseded** — emit at 32768 Hz PWM; FIFO pops stay on the timer |
+| 2 | `timer_cps_rate` rejects 256–4096 | **Fixed** — any enabled timer clocks the FIFO |
+| 3 | m4a HLE writes fake IWRAM | **Stubbed** — no RAM writes |
+| 4 | PSG clock vs pitch | **Partial** — 32768 Hz accum + CH3 formula in tree; LC unused |
+| 5 | Wave freq 32× slow | **Fixed** in code (`2097152/(2048−n)`); unproven in-game |
+| 6 | Last-tick-wins + cap of 4 | **Fixed** (PWM-rate emit; PSG still unproven) |
+| 7 | Hold cleared when timer “off” | **Fixed** — dest-off clears; timer-off holds |
+| 8 | DMA req hot at exactly 16 | **Fixed** (`len >= 16` clears) |
+| 9 | Forced mono / dest bits | **Fixed** — dest bits are enables; LC dest-both sums A+B |
+| 10 | SoundBias unused | **Fixed** (`bias_out`) |
+| 11 | Host reopens on rate change | **Fixed** — open once at 48 kHz |
+| 12 | Ring drops oldest | **Changed** — drop newest if full; underrun = silence |
+| 13 | Cubic resampler unused | **Open** (linear 32768→48k is what the host uses) |
+| 14 | Wave bank / 64-sample mode | **Open** |
+| 15 | `SOUNDCNT_X` bits 0–3 | **Open** |
+| 16 | FIFO clock ignores cascade | **Open** |
+| 17 | Headless always dumps `/tmp` WAV | **Open** (debug default) |
+| 18 | No golden PCM / dual-rate test | **Partial** — mixer unit tests exist; no committed WAV golden |
+
+**Also fixed (not in the original list):** ARM `STRB [Rn, Rm]` / reverb left
+buffer. Without it, B railed and leaked into A. Test:
+`cpu::tests::strb_reg_offset_uses_rm_not_imm`.
+
+### Sound fix waves (historical)
+
+1. Tie emit period to a real clock; hold the slower FIFO.
+2. Drop the 256–4096 reject.
+3. PSG 32768 Hz accum; CH3 formula.
+4. `dma_req` at `len >= 16`.
+5. Stub m4a SWIs (no fake PCM).
+6. Emit at hardware PWM 32768 Hz.
+7. `pw-cat`, prebuffer, silence on underrun; `fairy tone` through the ring.
+8. Addressing mode 2; dest-both A+B.
+
+---
+
+## Findings (original text)
+
+Severity labels below are from the first pass. Check **Finding status** before
+treating a P0 as open. The “mono mix” / 13378 Hz host / fake-IWRAM descriptions
+are stale.
 
 ### P0
 
@@ -198,14 +247,14 @@ Host is `-c 1`. `SOUNDCNT_H` dest bits are enables, not pan. `SOUNDCNT_L` L/R is
 
 ---
 
-## Recommended fix order
+## Recommended fix order (current)
 
-1. Tie `stream_rate` to `cps_out`. Dual-rate: emit at the faster tick, hold the slower FIFO.  
-2. Drop the 256–4096 reject; clamp host open rate only.  
-3. Independent 32768 Hz PSG accumulator; CH3 `2097152/(2048-n)`; mix the sum of ticks.  
-4. Clear `dma_req` when `len >= 16` after refill (or set only on the half-empty crossing).  
-5. Stub or really implement m4a — do not write fake IWRAM.  
-6. Dual-rate unit test + a tiny committed PCM fixture (not a commercial ROM).
+1–5 and the STRB/reverb fix are done. Next:
+
+1. Play LC **fights** (cries, layered SFX). If it rails again, dump `FAIRY_MIX_STAT=1` before changing the mixer.
+2. `SOUNDCNT_X` channel-on bits; wave 64-sample bank.
+3. A tiny committed PCM fixture (not a commercial ROM). Dual-timer A/B at different rates if a title needs it.
+4. Leave BIOS m4a as stubs unless a game actually calls SWI `0x1A`–`0x2B`.
 
 ---
 

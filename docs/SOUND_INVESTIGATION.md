@@ -1,8 +1,8 @@
 # Sound investigation — Pokemon Liquid Crystal (v3.3.00512)
 
 **Status (2026-08-13): FIXED and committed.** The hang below was timer
-readback + IRQ/IntrWait + FIFO special DMA. Headless 400-frame run now reaches
-the IWRAM stream decoder (`0x03002C38`) with FIFO audio at ~13.4 kHz.
+readback + IRQ/IntrWait + FIFO special DMA. Listenable intro music is
+`7816e1b` / tag `sacred/sound-working` (ARM `STRB [Rn, Rm]` + dest-both).
 
 This file is the historical write-up of the drone/hang. Do not treat the
 “ROOT CAUSE IDENTIFIED (game hangs)” diagnosis as current. See `AGENTS.md`

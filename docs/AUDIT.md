@@ -1,72 +1,112 @@
 # Fairy Lantern audit
 
-**Date:** 2026-08-13  
+**Original date:** 2026-08-13  
+**Current as of:** 2026-08-13, `7816e1b` / tag `sacred/sound-working`  
 **Tree:** independent repo (`ElegantVW/fairy-lantern`)  
-**Scope:** static review of `src/`, docs, git/hygiene, plus `cargo test`, clippy, built-in self-tests, and a headless Pokémon Liquid Crystal run. Sound-only follow-up: [SOUND_AUDIT.md](SOUND_AUDIT.md).
+**Scope:** static review of `src/`, docs, git/hygiene, tests, and Pokémon Liquid Crystal. Sound follow-up: [SOUND_AUDIT.md](SOUND_AUDIT.md).
 
-### Fix wave (same day)
+Numbered findings below are the **original write-up**. Many are done. Use the status table, not the old P0 labels.
 
-Landed after this audit; the numbered items below stay as written history:
+## Verdict (current)
 
-1. ARM `MSR #imm` mask is `0x0FB0_F000` (finding 3).
-2. Savestate magic `FAELST03`: IO restored *before* timer-ctrl rebuild; persist frac, halt, DMA, FIFOs. `FAELST02` still loads (finding 1–2).
-3. ROM/zip cap 32 MiB; zip declared size must match extracted bytes (finding 4).
-4. `cargo test` now includes MSR, timer cascade, FIFO DMA, savestate round-trip, ROM cap, plus the 9 CLI self-tests (finding 24).
-5. `Cargo.toml` 0.10.0; `AGENTS.md` / `SOUND_INVESTIGATION.md` / README no longer claim an uncommitted hang.
+A from-scratch interpreter that boots Liquid Crystal (BPRE) to the overworld and
+plays the intro/title song through real DirectSound FIFOs. CPU, IRQ, timers,
+FIFO DMA, and the ARM `STRB [Rn, Rm]` addressing-mode-2 bug were the load-bearing
+fixes.
 
-### Fix wave 2
+It is **not** a complete GBA: unknown opcodes NOP, SWI does not enter SVC, BIOS
+reads are not open-bus, DMA3 video capture is missing, PSG is unproven, save
+detect defaults to SRAM, and there are no PPU goldens or CI.
 
-6. FIQ / UND / ABT banks; `LDM/STM ^` user-bank R8–R14 (findings 6–7). Savestate `FAELST04`.
-7. Sequential vs N-cycle ROM fetch waitstates; WS0/1/2 S bits + prefetch (finding 17).
-8. Affine identity/PD hacks gated; `FAIRY_ACCURATE_AFFINE=1` disables (findings 12–13).
-9. `FAIRY_DMA_TRACE` uses the cached `fairy_trace()` flag on bus/DMA/emu/sound (finding 21).
-10. `faeos/fairy-lantern` vendor-synced; plan points at `~/fairy-lantern` (finding 26).
-11. `cargo clippy --all-targets -- -D warnings` is clean (noisy lints allowed in `Cargo.toml`).
+Use it for titles that have been walked through. Do not read “v0.10” as
+mGBA-class.
 
-## Verdict
-
-A working from-scratch GBA interpreter that got one commercial ROM (Liquid Crystal / BPRE) past boot by fixing timers, IRQ HLE, and FIFO DMA. The interesting hardware work is real. The project is **not** commercial-class by emulator standards: unknown opcodes are silent NOPs, savestates are incomplete, ARM `MSR #imm` never decodes, tests barely exist, and several PPU/sound paths are game-shaped hacks.
-
-Use it as a faeOS app for the titles it has been walked through. Do not treat README “v0.10 commercial-class” as an accuracy claim.
-
-## Snapshot
+## Snapshot (current)
 
 | Item | State |
 |---|---|
-| Size | ~10.4k lines, 31 `.rs` files |
-| `Cargo.toml` version | `0.1.0` (README says v0.10) |
-| Git | clean; 3 commits on `main` |
-| `cargo test` | 7 unit tests passed (sound FIFO / mixer / PSG only). Same suite runs twice (`fairy` + `fairy-lantern` bins). |
-| `fairy-lantern test` | 8/8 self-tests passed |
-| `cargo clippy -- -D warnings` | **fails** (~84 errors / 336 diagnostics across both bins). Includes real bugs, not just style. |
+| Version | `Cargo.toml` 0.10.0 |
+| Restore | tag `sacred/sound-working`, branch `checkpoint/sound-working` (`7816e1b`) |
+| `cargo test --release --bin fairy` | 41 unit tests passed |
 | CI | none |
-| `faeos/fairy-lantern` | stale (monolithic `sound.rs`, no `LICENSE`/`README`, 23 vs 31 source files) |
-| `AGENTS.md` | stale (“uncommitted working tree”; the tree is committed) |
+| `faeos/fairy-lantern` | stale — do not edit |
+| Docs | this file + [AGENTS.md](../AGENTS.md) + [SOUND_AUDIT.md](SOUND_AUDIT.md) |
 
-### Liquid Crystal headless (release, 400 frames)
+### Liquid Crystal (after `sacred/sound-working`)
 
-ROM: `~/.local/share/faeos/fairy-lantern/roms/Pokemon Liquid Crystal (v3.3.00512).gba` (16 MiB, code `BPRE`). Not committed.
+ROM: user-supplied BPRE, not in repo.
 
-| Metric | 200 frames | 400 frames |
+| | 400-frame (pre-audio-fix, historical) | 450-frame (sound-working) |
 |---|---|---|
-| cycles | 56,178,037 | 112,356,068 |
-| expected `n * 280896` | 56,179,200 | 112,358,400 |
-| pc | `0x080008AE` (near boot wait) | `0x03002C38` (IWRAM stream decoder; intro) |
-| irqs | 398 | 798 |
+| cycles | 112,356,068 / expected 112,358,400 | 126,400,555 / expected 126,403,200 |
+| pc | `0x03002C38` | `0x03002C50` (same IWRAM mixer) |
 | `unk_ops` / `swi_unk` | 0 / 0 | 0 / 0 |
-| FIFO samples out | 44,966 | 89,766 |
-| peak / from_fifo | 2048 / 88,842 | **10944** / 178,442 |
-| game rate | 13378 Hz | 13378 Hz |
+| A mix buffer | healthy 8-bit | peak ~30–57, mean ~6–12, rail 0 |
+| B mix buffer | railed ±128 (reverb never wrote it) | peak ~15–71, mean ~6–13, rail 0 |
+| host emit | 13378 Hz advertised | 32768 Hz PWM hold → 48 kHz stereo |
 | PSG | 0 | 0 |
-| SWI LZ77 W/V | 9 / 2 | 9 / 2 |
+| intro | song buried under star wash | listenable; star is a one-shot |
 
-Cycle count is within ~0.002% of the GBA frame clock. By frame 400 the intro decoder is running and FIFO audio has a real peak (not the old 3-tone drone). That corroborates the LC checkpoint; it does not generalize to other games.
+Affine identity/PD hacks remain **on** by default. Battles are the next checkpoint.
+
+## Finding status
+
+| # | Topic | Status |
+|---|---|---|
+| 1 | Savestate timer-ctrl from old IO | **Fixed** (`FAELST03`+) |
+| 2 | Savestate not a full machine | **Partial** — DMA, FIFOs, halt, frac saved; EEPROM FSM / RTC GPIO / flash `cmd_step` still omitted |
+| 3 | ARM `MSR #imm` never decodes | **Fixed** (mask `0x0FB0_F000` + test) |
+| 4 | Zip / ROM no size cap | **Fixed** (32 MiB + zip size match) |
+| 5 | Unknown opcodes silent NOP | **Open** — counter in title bar / headless; no trap |
+| 6 | BIOS always readable | **Open** — comment claims open-bus; reads still serve `bios[]` |
+| 7 | Duplicate SOUNDCNT `write16` arms | **Fixed** (clippy clean on that path) |
+| 8 | Only USR/IRQ/SVC banked | **Fixed** (FIQ/UND/ABT) |
+| 9 | `LDM/STM ^` user-bank ignored | **Fixed** |
+| 10 | SWI never enters SVC | **Open** |
+| 11 | SoftReset / Sqrt / RegisterRamReset | **Partial** — SoftReset honors `03007FFA`; IWRAM wipe keeps last 0x200; **Sqrt still `f64`** |
+| 12 | HBlank at end of 1232-cycle line | **Fixed** (`HBLANK_CYCLE = 1006`) |
+| 13 | Affine identity / PD caps | **Gated** — still default-on; `FAIRY_ACCURATE_AFFINE=1` disables |
+| 14 | DMA3 video capture | **Open** |
+| 15 | Timer overflow storms capped at 16 | **Open** |
+| 16 | m4a BIOS HLE guess / fake PCM | **Stubbed** — no IWRAM writes; LC uses ROM mixer |
+| 17 | Waitstates averaged | **Partial** — sequential vs N fetch + LDR/STR data waits; no real prefetch buffer |
+| 18 | VRAM `% 96K` | **Open** |
+| 19 | Unknown save → 64K SRAM | **Open** |
+| 20 | Flash IDs / erase approximate | **Open** |
+| 21 | `FAIRY_DMA_TRACE` env on hot path | **Fixed** (`fairy_trace()` OnceLock) |
+| 22 | LC PCs hardcoded in `cpu/mod.rs` | **Open** (gated, still in tree) |
+| 23 | Docs contradict each other | **Fixed** (this refresh) |
+| 24 | Almost no regression tests | **Partial** — 41 unit tests; still no PPU goldens / PCM fixture |
+| 25 | No CI / toolchain pin | **Open** |
+| 26 | `faeos/fairy-lantern` will rot | **Open** — treat as dead; do not edit |
+| 27 | Host is `aplay`/`pw-cat` | **Partial** — `pw-cat` 48 kHz stereo, no reopen; still Linux-only |
+| 28 | Headless always writes `/tmp` WAV+PPM | **Open** (intentional for debug) |
+| 29 | TUI needs Spellbook on PATH | **Open** |
+| 30 | SPARK assembler `panic!` | **Open** |
+
+Plus (not in the original list): ARM addressing mode 2 register offset — **Fixed**
+(`addr_mode2_offset`; `strb_reg_offset_uses_rm_not_imm`). That was the
+listenable-audio bug. See [SOUND_AUDIT.md](SOUND_AUDIT.md).
+
+### Fix waves (same day, historical)
+
+1. ARM `MSR #imm` mask `0x0FB0_F000`.
+2. Savestate `FAELST03` then `FAELST04`: IO before timer shadows; frac, halt, DMA, FIFOs.
+3. ROM/zip cap 32 MiB.
+4. Tests: MSR, timer cascade, FIFO DMA, savestate, ROM cap, `STRB [Rn,Rm]`.
+5. FIQ/UND/ABT banks; `LDM/STM ^`.
+6. Sequential fetch waitstates; data waitstates.
+7. Affine hacks gated.
+8. `fairy_trace()` cached.
+9. Clippy `-D warnings` clean (noisy lints allowed in `Cargo.toml`).
+10. Addressing mode 2; dest-both A+B; 32768 Hz hold; `pw-cat` host.
 
 ---
 
-## Findings
+## Findings (original text)
 
-Severity: **P0** = correctness or safety you can hit today · **P1** = accuracy hole that will break other games · **P2** = quality / docs / perf · **P3** = nit.
+Severity labels below are from the first pass. Check the **Finding status** table
+before treating a P0 as open.
 
 ### P0
 
@@ -238,6 +278,7 @@ Do not bury this. The project earned LC boot with real work.
 - ARM data-processing, barrel shifter (RRX, PC+12 `Rm`), long multiply, SWP, halfword/signed transfers, LDM empty-list quirk, Thumb formats 1–7 plus hi-reg/BX/BL pair — a real subset, not a toy.
 - IRQ HLE (stack frame + `0x03007FFC` + `BIOS_IRQ_RETURN`) and IntrWait mirror at `0x03007FF8` are the right shape.
 - FIFO special DMA: 4 words, fixed dest `0x040000A0/A4`, reload-on-enable-0→1 only — matches GBATEK and is why LC audio works.
+- ARM addressing mode 2 (`STRB [Rn, Rm]`) — m4a reverb actually writes the left pcmBuffer.
 - Timer prescale remainder + cascade was the documented LC boot hang; the current code is the fix.
 - PPU has a real compositor (priority, WIN0/1 + OBJ window, mosaic BG/OBJ, semi-OBJ blend, modes 0–5).
 - IF is write-1-to-clear; KEYCNT edge IRQ exists; GPIO RTC detect exists; zip-of-gba loader skips `__MACOSX`.
@@ -261,18 +302,17 @@ Also unused: `Eeprom512`, `Timers::on_write_reload`, `Emu::from_path`, `Cpu::{re
 
 ---
 
-## Recommended fix order
+## Recommended fix order (current)
 
-Not done in this audit.
+1–8 of the original list are done or no longer first. Next, in order:
 
-1. Fix `MSR #imm` mask; add a unit test (`MSR CPSR_c, #0x1F` must change mode).
-2. Savestate: restore IO before timer shadows; persist DMA + FIFOs + `halt_wait` + `timers.frac`; bump magic.
-3. Cap zip/ROM at 32 MiB; reject uncompressed-size mismatches.
-4. Cache `FAIRY_DMA_TRACE` everywhere; move LC PC traces out of `cpu/mod.rs`.
-5. Promote `run_self_tests` into `#[test]` modules; add savestate round-trip + timer cascade + FIFO DMA tests.
-6. Align `Cargo.toml` / README versions; rewrite `AGENTS.md` and `SOUND_INVESTIGATION.md` to “fixed, committed.”
-7. Decide: delete or vendor-sync `faeos/fairy-lantern`.
-8. Only then: FIQ banks, LDM `^`, sequential waitstates, affine hacks behind a compat flag.
+1. Walk LC **fights** (affine, blend, cries). Try `FAIRY_ACCURATE_AFFINE=1` if a HUD/camera is wrong.
+2. Integer `Sqrt` SWI; BIOS open-bus unless PC is in BIOS.
+3. Trap or log the first unknown opcode (PC + word) in the play window.
+4. Hardware VRAM mirrors; `SOUNDCNT_X` channel-on bits; wave 64-sample bank.
+5. PPU golden frames (title / overworld / one fight) + a tiny committed PCM fixture.
+6. Save-type detect without “default SRAM”; DMA3 special; timer overflow cap.
+7. CI + rust-toolchain. Do not sync `faeos/fairy-lantern` until this repo is the only build.
 
 ---
 
