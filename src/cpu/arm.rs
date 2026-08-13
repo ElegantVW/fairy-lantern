@@ -506,14 +506,23 @@ fn ldrh_strh(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
 
     if l {
         let val = if h && !s {
-            // LDRH
-            bus.read16(addr & !1) as u32
+            // LDRH — unaligned: aligned halfword ROR 8 (GBATEK)
+            let hw = bus.read16(addr & !1) as u32;
+            if addr & 1 != 0 {
+                hw.rotate_right(8)
+            } else {
+                hw
+            }
         } else if !h && s {
             // LDRSB
             bus.read8(addr) as i8 as i32 as u32
         } else if h && s {
-            // LDRSH
-            bus.read16(addr & !1) as i16 as i32 as u32
+            // LDRSH — unaligned is LDRSB of that byte
+            if addr & 1 != 0 {
+                bus.read8(addr) as i8 as i32 as u32
+            } else {
+                bus.read16(addr) as i16 as i32 as u32
+            }
         } else {
             bus.read8(addr) as u32
         };

@@ -732,4 +732,31 @@ mod tests {
         assert_eq!(cpu.r[13], 0x2222_2222, "IRQ SP not overwritten");
         assert_eq!(cpu.r13_usr, 0x3333_3333);
     }
+
+    #[test]
+    fn ldrh_unaligned_rors() {
+        // LDRH r0, [r1]
+        let cart = cart_with(&[0xE1D1_00B0]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.write16(0x0300_0000, 0x1234);
+        cpu.r[1] = 0x0300_0001;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.unknown_ops, 0, "must decode LDRH");
+        assert_eq!(cpu.r[0], 0x3400_0012, "unaligned LDRH is 32-bit ROR 8");
+    }
+
+    #[test]
+    fn ldrsh_unaligned_is_ldrsb() {
+        // LDRSH r0, [r1]
+        let cart = cart_with(&[0xE1D1_00F0]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.write8(0x0300_0001, 0x80);
+        cpu.r[1] = 0x0300_0001;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[0], 0xFFFF_FF80, "unaligned LDRSH is LDRSB");
+    }
 }

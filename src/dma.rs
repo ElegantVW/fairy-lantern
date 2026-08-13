@@ -88,6 +88,29 @@ impl DmaController {
             let mut chn = c.clone();
             run_transfer(bus, ch, &mut chn);
             self.ch[ch] = chn;
+            return;
+        }
+        // Empty FIFO asserts DRQ; enabling special DMA1/2 must fill now
+        // (up to 32 samples), not wait for the first timer underrun.
+        if timing == Timing::Special as u16 && (ch == 1 || ch == 2) {
+            let which = if ch == 1 { 0u8 } else { 1 };
+            for _ in 0..2 {
+                let n = if which == 0 {
+                    bus.sound.fifo_a_len()
+                } else {
+                    bus.sound.fifo_b_len()
+                };
+                if n >= 32 {
+                    break;
+                }
+                let mut chn = self.ch[ch].clone();
+                let saved = chn.count;
+                chn.count = 4;
+                run_transfer(bus, ch, &mut chn);
+                chn.count = saved;
+                self.ch[ch] = chn;
+                bus.sound.clear_dma_req(which);
+            }
         }
     }
 
@@ -330,14 +353,13 @@ mod tests {
         emu.bus.write16(0x0400_00C6, 0xB600);
 
         assert!(emu.bus.dma.ch[1].active);
-        assert_eq!(emu.bus.sound.fifo_a_len(), 0);
-
-        let mut dma = std::mem::take(&mut emu.bus.dma);
-        dma.on_fifo_request(&mut emu.bus);
-        emu.bus.dma = dma;
-
-        assert_eq!(emu.bus.sound.fifo_a_len(), 16, "FIFO special DMA is 4 words");
-        assert_eq!(emu.bus.dma.ch[1].src, 0x0300_0010);
+        // Empty FIFO DRQ: enable must fill immediately (2×4 words → 32 samples).
+        assert_eq!(
+            emu.bus.sound.fifo_a_len(),
+            32,
+            "special DMA fills FIFO on enable"
+        );
+        assert_eq!(emu.bus.dma.ch[1].src, 0x0300_0020);
         assert!(emu.bus.dma.ch[1].active, "repeat keeps the channel live");
     }
 
