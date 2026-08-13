@@ -154,7 +154,10 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
         let clk = emu.bus.rtc.clock_string();
         let elapsed = clock_start.elapsed().as_secs();
         let unk = if emu.cpu.unknown_ops > 0 {
-            format!(" · unk_ops={}", emu.cpu.unknown_ops)
+            format!(
+                " · unk_ops={} last={:08X}",
+                emu.cpu.unknown_ops, emu.cpu.last_unknown
+            )
         } else {
             String::new()
         };

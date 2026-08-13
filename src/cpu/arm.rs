@@ -243,9 +243,13 @@ fn apply_msr(cpu: &mut Cpu, spsr: bool, field_mask: u32, v: u32) {
         cpu.cpsr.v = v & (1 << 28) != 0;
     }
     if field_mask & 1 != 0 {
+        // USR cannot write the control field (mode / I / F).
+        if cpu.cpsr.mode & 0x1F == 0x10 {
+            return;
+        }
         let new_mode = (v & 0x1F) as u8;
         cpu.set_mode(new_mode);
-        cpu.cpsr.thumb = v & (1 << 5) != 0;
+        // ARM7TDMI: T is not writable via MSR. BX / exception return only.
         cpu.cpsr.fiq_disable = v & (1 << 6) != 0;
         cpu.cpsr.irq_disable = v & (1 << 7) != 0;
     }
@@ -692,6 +696,13 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
     let load_pc = l && (list & (1 << 15)) != 0;
     // S=1 and R15 not in list: transfer user-bank R8–R14 (GBATEK / ARM ARM).
     let user_bank = s && !load_pc;
+    let base_in_list = !empty && (list & (1 << rn)) != 0;
+    let lowest = list.trailing_zeros() as usize;
+    let final_base = if u {
+        addr.wrapping_add(4 * count)
+    } else {
+        addr.wrapping_sub(4 * count)
+    };
     for i in 0..16 {
         if list & (1 << i) != 0 {
             if l {
@@ -719,6 +730,9 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
                 let v = if i == 15 {
                     // STM PC stores PC+12
                     cpu.pc_arm_read().wrapping_add(4)
+                } else if i == rn && base_in_list && i != lowest {
+                    // ARM7: Rn in list, not first → store writeback value
+                    final_base
                 } else if user_bank && (8..=14).contains(&i) {
                     cpu.user_reg(i)
                 } else {
@@ -729,12 +743,7 @@ fn ldm_stm(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             a = a.wrapping_add(4);
         }
     }
-    if w && rn != 15 && !user_bank {
-        let final_base = if u {
-            addr.wrapping_add(4 * count)
-        } else {
-            addr.wrapping_sub(4 * count)
-        };
+    if w && rn != 15 && !user_bank && !(l && base_in_list) {
         cpu.r[rn] = final_base;
     }
     count + 1 + bus.data_burst_waitstates(start, count)

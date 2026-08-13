@@ -170,7 +170,9 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
                 addr = addr.wrapping_add(4);
             }
         }
-        if list != 0 {
+        // ARM7TDMI: LDMIA with Rb in the list keeps the loaded value (no
+        // writeback). STMIA always writebacks. Empty list is a no-op here.
+        if list != 0 && !(l && (list & (1 << rb)) != 0) {
             cpu.r[rb] = addr;
         }
         let n = list.count_ones().max(1);
@@ -241,7 +243,15 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
                 // LDR — unaligned rotates
                 cpu.r[rd] = bus.read32(addr & !3).rotate_right((addr & 3) * 8);
             }
-            5 => cpu.r[rd] = bus.read16(addr & !1) as u32, // LDRH
+            5 => {
+                // LDRH — unaligned is 32-bit ROR 8 (same as ARM / imm form)
+                let hw = bus.read16(addr & !1) as u32;
+                cpu.r[rd] = if addr & 1 != 0 {
+                    hw.rotate_right(8)
+                } else {
+                    hw
+                };
+            }
             6 => cpu.r[rd] = bus.read8(addr) as u32,       // LDRB
             7 => {
                 // LDRSH — unaligned: sign-extend byte pair from aligned half

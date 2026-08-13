@@ -73,6 +73,28 @@ pub fn detect(rom: &[u8]) -> SaveType {
     SaveType::None
 }
 
+/// Manufacturer/device IDs the SDK flash lib compares against.
+///
+/// Only chips that speak the AMD unlock we implement. Never report Atmel
+/// (`0x1F`/`0x3D`) — that library uses a different command set.
+pub fn flash_ids(rom: &[u8], size: usize) -> (u8, u8) {
+    let s = String::from_utf8_lossy(rom);
+    if size >= 128 * 1024 {
+        // FLASH1M_V102 Macronix 0xC2/0x09; V103 (FRLG / LC) Sanyo 0x62/0x13.
+        if s.contains("FLASH1M_V102") {
+            return (0xC2, 0x09);
+        }
+        return (0x62, 0x13);
+    }
+    if s.contains("PANASONIC") {
+        return (0x32, 0x1B);
+    }
+    if s.contains("MACRONIX") {
+        return (0xC2, 0x1C);
+    }
+    (0xBF, 0xD4) // SST — FLASH512_V13x default
+}
+
 /// `.sav` next to the ROM, or under data dir if ROM path is weird.
 pub fn sav_path_for_rom(rom: &Path) -> PathBuf {
     let stem = rom.file_stem().and_then(|s| s.to_str()).unwrap_or("fable");
@@ -127,18 +149,24 @@ pub struct FlashChip {
 
 impl FlashChip {
     pub fn new(size: usize) -> Self {
-        let (m, d) = if size >= 128 * 1024 {
-            (0x62, 0x13) // Sanyo 128K-ish id used by some emus
-        } else {
-            (0xBF, 0xD4) // SST / Panasonic style 64K
-        };
+        let (m, d) = flash_ids(&[], size);
+        Self::with_ids(size, m, d)
+    }
+
+    /// Pick IDs from the ROM's SDK tag (FLASH1M_V103 → Sanyo, etc.).
+    pub fn new_for(size: usize, rom: &[u8]) -> Self {
+        let (m, d) = flash_ids(rom, size);
+        Self::with_ids(size, m, d)
+    }
+
+    fn with_ids(size: usize, manufacturer: u8, device: u8) -> Self {
         Self {
             data: vec![0xFF; size.max(64 * 1024)],
             bank: 0,
             cmd_step: 0,
             mode: 0,
-            manufacturer: m,
-            device: d,
+            manufacturer,
+            device,
         }
     }
 
@@ -506,6 +534,16 @@ mod tests {
         let mut sram = vec![0u8; 256];
         sram[10..16].copy_from_slice(b"SRAM_V");
         assert!(matches!(detect(&sram), SaveType::Sram(_)));
+    }
+
+    #[test]
+    fn flash_ids_follow_sdk_tag() {
+        assert_eq!(flash_ids(b"FLASH1M_V103", 128 * 1024), (0x62, 0x13));
+        assert_eq!(flash_ids(b"FLASH1M_V102", 128 * 1024), (0xC2, 0x09));
+        assert_eq!(flash_ids(b"FLASH512_V131", 64 * 1024), (0xBF, 0xD4));
+        assert_eq!(flash_ids(b"PANASONIC FLASH_V", 64 * 1024), (0x32, 0x1B));
+        // Never claim Atmel — we do not implement its command set.
+        assert_ne!(flash_ids(b"FLASH512_V", 64 * 1024).0, 0x1F);
     }
 
     #[test]

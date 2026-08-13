@@ -8,13 +8,15 @@ The copy at `faeos/fairy-lantern` is stale and should not be edited.
 v0.10.0. Restore point for **listenable intro music**: tag `sacred/sound-working`
 / branch `checkpoint/sound-working` (`7816e1b`). The working tree is **ahead** of
 that tag: fight HP bars, Flash 128K erase, `FAELST05`, F5 shot+`.dbg.txt`,
-pacing recovery, SWI→SVC, timer overflow counts, CI.
+pacing recovery, SWI→SVC, timer overflow counts, CI, unused-IO open bus,
+HALTCNT Halt, 2-cycle IRQ delay.
 
 LC (BPRE) boots to the overworld, plays intro/title through DirectSound A+B,
 can finish an in-game FLASH save, and can fight (HUD, EXP). Affine identity/PD
 hacks stay **on** by default until the LC campaign is walked further.
 
-This is **not** mGBA-class. Remaining holes: [docs/AUDIT.md](docs/AUDIT.md).
+This is **not** a commercial GBA emulator and **not** mGBA-class. Remaining
+holes: [docs/AUDIT.md](docs/AUDIT.md).
 Sound path: [docs/SOUND_AUDIT.md](docs/SOUND_AUDIT.md).
 Old boot-hang write-up: [docs/SOUND_INVESTIGATION.md](docs/SOUND_INVESTIGATION.md).
 

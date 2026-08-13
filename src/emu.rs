@@ -112,7 +112,7 @@ impl Emu {
                         frame = true;
                         self.frames_since_flush += 1;
                     }
-                    irq::check(&mut self.cpu, &mut self.bus);
+                    irq::check(&mut self.cpu, &mut self.bus, c);
                     let if_ = self.bus.read16(0x0400_0202);
                     let ie = self.bus.read16(0x0400_0200);
                     let bios_flag = self.bus.read16(0x0300_7FF8);
@@ -156,7 +156,7 @@ impl Emu {
                         self.frames_since_flush = 0;
                     }
                 }
-                irq::check(&mut self.cpu, &mut self.bus);
+                irq::check(&mut self.cpu, &mut self.bus, c);
                 slice += c;
                 left = left.saturating_sub(c);
                 if frame {

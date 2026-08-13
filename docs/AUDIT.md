@@ -1,7 +1,7 @@
 # Fairy Lantern audit
 
 **Original date:** 2026-08-13  
-**Current as of:** 2026-08-13 (tree ahead of `7816e1b` / `sacred/sound-working`)  
+**Current as of:** 2026-08-14 (tree ahead of `f1fc40d` / `sacred/sound-working`)  
 **Tree:** independent repo (`ElegantVW/fairy-lantern`)  
 **Scope:** static review of `src/`, docs, git/hygiene, tests, and Pokémon Liquid Crystal. Sound follow-up: [SOUND_AUDIT.md](SOUND_AUDIT.md).
 
@@ -9,17 +9,18 @@ Numbered findings below are the **original write-up**. Many are done. Use the st
 
 ## Verdict (current)
 
-A from-scratch interpreter that boots Liquid Crystal (BPRE) to the overworld and
-plays the intro/title song through real DirectSound FIFOs. CPU, IRQ, timers,
-FIFO DMA, and the ARM `STRB [Rn, Rm]` addressing-mode-2 bug were the load-bearing
-fixes.
+A from-scratch interpreter that boots Liquid Crystal (BPRE) to the overworld,
+plays intro/title through real DirectSound FIFOs, can finish an in-game FLASH
+save, and can fight (HP/EXP HUD). CPU, IRQ, timers, FIFO DMA, and the ARM
+`STRB [Rn, Rm]` addressing-mode-2 bug were the load-bearing fixes.
 
-It is **not** a complete GBA: unknown opcodes still NOP (first 8 now log),
-DMA3 video capture is missing, PSG is unproven, and there are no PPU goldens
-or CI. SWI now enters SVC for HLE; untagged carts no longer invent SRAM.
+It is **not** a commercial GBA emulator and **not** mGBA-class. Unknown opcodes
+still NOP (first 8 log), PSG is unproven on LC, affine identity/PD hacks stay
+default-on, there are no PPU goldens, the host is Linux `pw-cat`, and only one
+title has been walked. SWI enters SVC for HLE; untagged carts do not invent SRAM.
 
-Use it for titles that have been walked through. Do not read “v0.10” as
-mGBA-class.
+Use it for titles that have been walked through. Do not read “v0.10” as a
+completeness claim.
 
 ## Snapshot (current)
 
@@ -27,8 +28,8 @@ mGBA-class.
 |---|---|
 | Version | `Cargo.toml` 0.10.0 |
 | Restore | tag `sacred/sound-working`, branch `checkpoint/sound-working` (`7816e1b`) |
-| `cargo test --release --bin fairy` | 41 unit tests passed |
-| CI | none |
+| `cargo test --bin fairy` | 98 unit tests passed |
+| CI | `rust-toolchain.toml` + `.github/workflows/test.yml` |
 | `faeos/fairy-lantern` | stale — do not edit |
 | Docs | this file + [AGENTS.md](../AGENTS.md) + [SOUND_AUDIT.md](SOUND_AUDIT.md) |
 
@@ -63,7 +64,7 @@ Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`
 | 8 | Only USR/IRQ/SVC banked | **Fixed** (FIQ/UND/ABT) |
 | 9 | `LDM/STM ^` user-bank ignored | **Fixed** |
 | 10 | SWI never enters SVC | **Fixed** — enter SVC + I + ARM, HLE, restore SPSR (SoftReset may stay out) |
-| 11 | SoftReset / Sqrt / RegisterRamReset | **Partial** — SoftReset + integer Sqrt; IWRAM keeps last 0x200; bit7 clears IO not CPU |
+| 11 | SoftReset / Sqrt / RegisterRamReset | **Fixed** — SoftReset honors `03007FFA` (ROM vs EWRAM) and wipes 200h; integer Sqrt; IWRAM keeps last 0x200; bit7 clears IO not CPU |
 | 12 | HBlank at end of 1232-cycle line | **Fixed** (`HBLANK_CYCLE = 1006`) |
 | 13 | Affine identity / PD caps | **Gated** — still default-on; `FAIRY_ACCURATE_AFFINE=1` disables |
 | 14 | DMA3 video capture | **Fixed** — special DMA3 one line per HBlank, VCOUNT 2..=161, off at 162 |
@@ -72,17 +73,17 @@ Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`
 | 17 | Waitstates averaged | **Partial** — WS0/1/2 N+S, SRAM WAITCNT; cart data forces next fetch N; prefetch is an 8-halfword stand-in |
 | 18 | VRAM `% 96K` | **Fixed** — 128K window, upper 32K mirrors OBJ |
 | 19 | Unknown save → 64K SRAM | **Fixed** — untagged cart is `SaveType::None` (no SRAM poke) |
-| 20 | Flash IDs / erase approximate | **Partial** — AMD 80+AA/55+10/30 erase works; IDs still hardcoded Sanyo/SST |
+| 20 | Flash IDs / erase approximate | **Partial** — AMD 80+AA/55+10/30 erase works; IDs follow SDK tag (Sanyo/Macronix/SST/Panasonic). Atmel protocol not implemented (never reported) |
 | 21 | `FAIRY_DMA_TRACE` env on hot path | **Fixed** (`fairy_trace()` OnceLock) |
 | 22 | LC PCs hardcoded in `cpu/mod.rs` | **Partial** — `cfg(debug)` + `FAIRY_DMA_TRACE`; gone from release step |
 | 23 | Docs contradict each other | **Fixed** (this refresh) |
-| 24 | Almost no regression tests | **Partial** — 67+ unit tests; still no PPU goldens / PCM fixture |
+| 24 | Almost no regression tests | **Partial** — 98 unit tests; still no PPU goldens / committed PCM fixture |
 | 25 | No CI / toolchain pin | **Partial** — `rust-toolchain.toml` + `.github/workflows/test.yml` |
 | 26 | `faeos/fairy-lantern` will rot | **Open** — treat as dead; do not edit |
 | 27 | Host is `aplay`/`pw-cat` | **Partial** — `pw-cat` 48 kHz stereo, no reopen; still Linux-only |
 | 28 | Headless always writes `/tmp` WAV+PPM | **Open** (intentional for debug) |
 | 29 | TUI needs Spellbook on PATH | **Open** |
-| 30 | SPARK assembler `panic!` | **Open** |
+| 30 | SPARK assembler `panic!` | **Fixed** — unencodable imm encodes `#0` instead of aborting |
 
 Plus (not in the original list):
 - ARM addressing mode 2 register offset — **Fixed** (`strb_reg_offset_uses_rm_not_imm`).
@@ -90,6 +91,23 @@ Plus (not in the original list):
 - Flash AMD erase 80+AA/55+10/30 — **Fixed**.
 - Host catch-up spiral (up to 6 frames, never recovered) — **Fixed** (1 extra if ring starving).
 - OBJ scanline cycle budget (~1210) — **Fixed** (OAM 0→127; leftovers dropped).
+- Unused IO / write-only FIFO+HALTCNT — **Fixed** (open bus, not `io[]` zeros).
+- HALTCNT (`4000301h`) — **Fixed** (byte/halfword write Halts; POSTFLG is bit0).
+- IRQ 2-cycle delay — **Fixed** (Halt 64-cycle slices still take immediately).
+- IE / IME unused bits — **Fixed** (IE `0x3FFF`, IME bit 0).
+- Thumb `LDMIA` writeback when `Rb` is in the list — **Fixed** (loaded value wins).
+- 8-bit PAL/OAM writes ignored; BG VRAM 8-bit duplicates the byte; OBJ ignored.
+- `write16`/`write32` to video mem no longer split into two `write8`s.
+- DISPSTAT bits 0–2 (v/h/vc flags) are read-only on write; WAITCNT bit15 stays 0.
+- ARM `LDM` base-in-list keeps the loaded value; `STM` stores the old base if Rn is first.
+- Thumb `LDRH [rb, ro]` unaligned is 32-bit ROR 8 (was a raw halfword).
+- `CpuFastSet` rounds the word count up to a multiple of 8 (GBATEK).
+- BIOS is 16K only (`00004000+` is open bus, not a mirror).
+- DMA0 SAD 27-bit / no Game Pak; DMA1–3 SAD 28-bit; DMA0–2 DAD 27-bit.
+- IF unused bits 14–15 stay 0.
+- SPARK assembler no longer `panic!`s on an unencodable immediate.
+- MSR CPSR does not write T (ARM7TDMI); USR cannot MSR the control field.
+- HLE boot leaves POSTFLG=1; SoftReset zeros IRQ/SVC LR+SPSR.
 - Gamepad / `KEYINPUT` from a host controller — **Deferred**. Keyboard only
   (`play::poll_keys`). minifb has no pad API. When LC’s campaign gate is done,
   map gilrs/evdev onto the same 10 bits; keep keys; no analog into KEYINPUT.
@@ -270,8 +288,8 @@ Internal assembler miss should be a build-time assert or `Result`, not a runtime
 
 ### P3
 
-- Thumb `LDMIA` always writebacks `Rb` even when `Rb` is in the list (ARMv4 writeback is implementation-defined / first-store-old). Worth a unit test.
-- ARM `LDR` to PC sets Thumb from bit 0 (ARMv5-ish). GBA is v4; hardware ignores bit 0 on ARM-state `LDR PC`.
+- Thumb `LDMIA` writeback when `Rb` is in the list — **Fixed** (loaded value kept).
+- ARM `LDR` to PC — **Fixed** (ARMv4, bit 0 ignored; `ldr_pc_stays_arm_on_v4`).
 - `play.rs:145` `if frame_n % 30 == 0 || status.is_empty()` — both branches call `rtc.clock_string()` (clippy `if_same_then_else`).
 - `arm.rs:339` leftover no-effect tuple in ROR-by-multiple-of-32; the following lines are correct.
 - `.gitignore` correctly ignores `*.gba` / `roms/*`. `faeos/fairy-lantern/roms/hello.gba` exists only in the monorepo.
@@ -311,14 +329,17 @@ Also unused: `Eeprom512`, `Timers::on_write_reload`, `Emu::from_path`, `Cpu::{re
 
 ## Recommended fix order (current)
 
-Done this week: sound checkpoint, HP bars, integer Sqrt, BIOS open-bus, unk_op log, VRAM mirrors.
+Done this week: sound checkpoint, HP bars, integer Sqrt, BIOS open-bus, unk_op
+log, VRAM mirrors, DMA3 capture, Flash AMD erase, unused-IO open bus, IRQ
+delay, HALTCNT, CI.
 
 Next:
 
-1. Play LC fights (mosaic drain, cries, fades, menu). `FAIRY_ACCURATE_AFFINE=1` if HUD/camera is wrong.
-2. PPU golden frames + a tiny committed PCM fixture.
-4. Save-type detect without “default SRAM”; DMA3 special; timer overflow cap.
-5. CI + rust-toolchain. Do not sync `faeos/fairy-lantern`.
+1. Play LC to Violet / Sprout / Falkner. Named bugs only (drain, fade, cry, `unk_op`).
+2. `FAIRY_ACCURATE_AFFINE=1` only after they approve — do not flip the default.
+3. PPU golden frames + a tiny committed PCM fixture.
+4. Unknown opcodes: stop silent-NOP (log in the play window; UND later).
+5. Second owned ROM when they have one. Do not sync `faeos/fairy-lantern`.
 
 ---
 

@@ -559,7 +559,7 @@ fn diagnose_rom(rom: &PathBuf, max_steps: u64) -> Result<()> {
         crate::timers::step(&mut emu.timers, &mut emu.bus, c);
         emu.bus.timer_reload = emu.timers.reload;
         emu.ppu.step(&mut emu.bus, c);
-        crate::irq::check(&mut emu.cpu, &mut emu.bus);
+        crate::irq::check(&mut emu.cpu, &mut emu.bus, c);
         if step < 40 || step >= 70 {
             let op = if emu.cpu.cpsr.thumb {
                 emu.bus.read16(pc) as u32

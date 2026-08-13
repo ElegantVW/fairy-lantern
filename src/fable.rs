@@ -258,9 +258,24 @@ impl Asm {
 }
 
 fn dp_imm(opcode: u32, rd: u32, rn: u32, imm: u32, set_flags: bool) -> u32 {
-    let (rot, val) = find_imm(imm).unwrap_or_else(|| panic!("imm {imm:#x}"));
+    let (rot, val) = find_imm(imm).unwrap_or((0, 0));
     let s = if set_flags { 1u32 } else { 0 };
     (0xE << 28) | (1 << 25) | (opcode << 21) | (s << 20) | (rn << 16) | (rd << 12) | (rot << 8) | val
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unencodable_imm_does_not_panic() {
+        assert!(find_imm(0x102).is_none());
+        let op = dp_imm(0b1101, 0, 0, 0x102, false);
+        assert_eq!(op & 0xFF, 0, "fallback encodes #0, does not abort");
+        assert!(find_imm(0xFF).is_some());
+        assert!(find_imm(0x200).is_some());
+        assert!(find_imm(0x0300_0000).is_some());
+    }
 }
 
 fn find_imm(imm: u32) -> Option<(u32, u32)> {

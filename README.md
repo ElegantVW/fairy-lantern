@@ -49,7 +49,8 @@ ROMs are user-supplied only (`.gba` / `.zip` containing a `.gba`).
 
 - ARM + Thumb interpreter (subset; unknown encodings are silent NOPs)
 - IRQ banking (USR/SYS, IRQ, SVC, FIQ, UND, ABT) + BIOS IRQ HLE + IntrWait/Halt
-- DMA immediate / VBlank / HBlank / FIFO special (DMA1/2). No DMA3 video capture.
+- DMA immediate / VBlank / HBlank / FIFO special (DMA1/2) + DMA3 video capture
+  (one line per HBlank, VCOUNT 2–161)
 - Timers with prescale remainder + cascade
 - BIOS SWI enters SVC then HLE (Div, Sqrt, decompress, AffineSet, …);
   m4a SWIs stay stubs (no fake IWRAM PCM)
@@ -61,7 +62,9 @@ ROMs are user-supplied only (`.gba` / `.zip` containing a `.gba`).
   untagged carts do not invent SRAM
 - Keypad IRQ (KEYCNT), cartridge GPIO RTC (SIIRTC), GBA frame pacing (~59.73 Hz)
 - Sequential vs N-cycle ROM fetch waitstates; data waitstates on LDR/STR;
-  open-bus on unmapped reads
+  open-bus on unmapped reads and unused/write-only IO; HALTCNT Halt;
+  ~2-cycle IRQ delay after IME/IE/IF; 8-bit PAL/OAM ignored, BG VRAM
+  duplicates the byte; DISPSTAT live flags are read-only
 
 ## Build
 

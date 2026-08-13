@@ -152,14 +152,22 @@ fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
     for r in cpu.r.iter_mut().take(13) {
         *r = 0;
     }
+    cpu.r14_svc = 0;
+    cpu.spsr_svc = crate::cpu::Cpsr::default();
+    cpu.r14_irq = 0;
+    cpu.spsr_irq = crate::cpu::Cpsr::default();
     cpu.set_mode(0x13);
     cpu.r[13] = 0x0300_7FE0;
+    cpu.r[14] = 0;
     cpu.set_mode(0x12);
     cpu.r[13] = 0x0300_7FA0;
+    cpu.r[14] = 0;
     cpu.set_mode(0x1F);
     cpu.r[13] = 0x0300_7F00;
+    cpu.r[14] = 0;
     cpu.cpsr.thumb = false;
     cpu.cpsr.irq_disable = false;
+    cpu.cpsr.fiq_disable = false;
     let entry = if flag & 1 != 0 {
         0x0200_0000
     } else {
@@ -316,9 +324,10 @@ fn cpu_fast_set(cpu: &mut Cpu, bus: &mut Bus) {
     let ctrl = cpu.r[2];
     let count = ctrl & 0x001F_FFFF; // 32-bit words
     let fill = ctrl & (1 << 24) != 0;
+    // GBATEK: word count is rounded up to a multiple of 8.
+    let count = count.saturating_add(7) & !7;
     let mut s = src;
     let mut d = dst;
-    // rounds up to multiple of 8 words in real BIOS; we honor count
     for _ in 0..count {
         let v = if fill {
             bus.read32(src)
@@ -702,6 +711,26 @@ mod tests {
     }
 
     #[test]
+    fn cpufastset_rounds_count_up_to_8() {
+        let (mut cpu, mut bus) = harness();
+        for i in 0..8u32 {
+            bus.write32(0x0300_0000 + i * 4, 0xA000_0000 + i);
+            bus.write32(0x0300_0100 + i * 4, 0xFFFF_FFFF);
+        }
+        cpu.r[0] = 0x0300_0000;
+        cpu.r[1] = 0x0300_0100;
+        cpu.r[2] = 2; // not a multiple of 8
+        cpu_fast_set(&mut cpu, &mut bus);
+        assert_eq!(bus.read32(0x0300_0100), 0xA000_0000);
+        assert_eq!(bus.read32(0x0300_0104), 0xA000_0001);
+        assert_eq!(
+            bus.read32(0x0300_011C),
+            0xA000_0007,
+            "count 2 is rounded up to 8 words"
+        );
+    }
+
+    #[test]
     fn soft_reset_honors_ram_boot_flag() {
         let (mut cpu, mut bus) = harness();
         bus.write8(0x0300_7FFA, 1);
@@ -711,6 +740,9 @@ mod tests {
         assert_eq!(cpu.r[0], 0);
         assert_eq!(cpu.cpsr.mode & 0x1F, 0x1F);
         assert_eq!(cpu.r[13], 0x0300_7F00);
+        assert!(!cpu.cpsr.fiq_disable);
+        assert_eq!(cpu.r14_irq, 0);
+        assert_eq!(cpu.r14_svc, 0);
         assert_eq!(bus.read8(0x0300_7FFA), 0, "flag region is wiped");
     }
 }

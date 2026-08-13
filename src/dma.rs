@@ -73,8 +73,8 @@ impl DmaController {
         if !was_enabled {
             c.latch_src = sad;
             c.latch_dst = dad;
-            c.src = sad & 0x0FFF_FFFF;
-            c.dst = dad & 0x0FFF_FFFF;
+            c.src = sad & sad_mask(ch);
+            c.dst = dad & dad_mask(ch);
             let mut count = cnt_l & 0xFFFF;
             if count == 0 {
                 count = if ch == 3 { 0x1_0000 } else { 0x4000 };
@@ -261,10 +261,10 @@ fn run_transfer(bus: &mut Bus, ch: usize, c: &mut Channel) {
             bus.note_cart_data();
         }
         if word {
-            let v = bus.read32(src & !3);
+            let v = dma_read32(bus, ch, src);
             bus.write32(dst & !3, v);
         } else {
-            let v = bus.read16(src & !1);
+            let v = dma_read16(bus, ch, src);
             if (dst & !1) >= 0x0400_00B0 && (dst & !1) <= 0x0400_00DF {
                 if crate::cpu::fairy_trace() {
                     eprintln!(
@@ -275,9 +275,9 @@ fn run_transfer(bus: &mut Bus, ch: usize, c: &mut Channel) {
             }
             bus.write16(dst & !1, v);
         }
-        src = adj(src, src_adj, step);
+        src = adj(src, src_adj, step) & sad_mask(ch);
         if !fifo_dma {
-            dst = adj(dst, dst_adj, step);
+            dst = adj(dst, dst_adj, step) & dad_mask(ch);
         }
         // fifo_dma: always write same FIFO address
     }
@@ -316,6 +316,45 @@ fn run_transfer(bus: &mut Bus, ch: usize, c: &mut Channel) {
             _ => crate::irq::IRQ_DMA3,
         };
         crate::irq::raise(bus, bit);
+    }
+}
+
+/// GBATEK: DMA0 SAD 27 bits; DMA1–3 SAD 28 bits.
+fn sad_mask(ch: usize) -> u32 {
+    if ch == 0 {
+        0x07FF_FFFF
+    } else {
+        0x0FFF_FFFF
+    }
+}
+
+/// GBATEK: DMA0–2 DAD 27 bits; DMA3 DAD 28 bits.
+fn dad_mask(ch: usize) -> u32 {
+    if ch == 3 {
+        0x0FFF_FFFF
+    } else {
+        0x07FF_FFFF
+    }
+}
+
+/// DMA0 cannot access the Game Pak (ROM / EEPROM window).
+fn dma0_cart(ch: usize, addr: u32) -> bool {
+    ch == 0 && matches!(addr >> 24, 0x08..=0x0D)
+}
+
+fn dma_read32(bus: &Bus, ch: usize, src: u32) -> u32 {
+    if dma0_cart(ch, src) {
+        0
+    } else {
+        bus.read32(src & !3)
+    }
+}
+
+fn dma_read16(bus: &Bus, ch: usize, src: u32) -> u16 {
+    if dma0_cart(ch, src) {
+        0
+    } else {
+        bus.read16(src & !1)
     }
 }
 
@@ -407,5 +446,56 @@ mod tests {
         emu.bus.dma = dma;
         assert!(!emu.bus.dma.ch[3].active, "capture ends at VCOUNT 162");
         assert_eq!(emu.bus.read16(0x0400_00DE) & 0x8000, 0);
+    }
+
+    #[test]
+    fn dma0_cannot_read_rom() {
+        let mut data = vec![0u8; 0x200];
+        data[0..4].copy_from_slice(&0xAABB_CCDDu32.to_le_bytes());
+        let cart = Cart {
+            data,
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut emu = Emu::new(&cart, None);
+        emu.bus.write32(0x0300_0000, 0x1111_1111);
+        emu.bus.write32(0x0400_00B0, 0x0800_0000);
+        emu.bus.write32(0x0400_00B4, 0x0300_0000);
+        emu.bus.write16(0x0400_00B8, 1);
+        emu.bus.write16(0x0400_00BA, 0x8400); // enable + 32-bit immediate
+        assert_eq!(
+            emu.bus.dma.ch[0].src & 0xF800_0000,
+            0,
+            "DMA0 SAD is 27-bit (ROM bit dropped)"
+        );
+        assert_ne!(
+            emu.bus.read32(0x0300_0000),
+            0xAABB_CCDD,
+            "DMA0 must not copy Game Pak"
+        );
+    }
+
+    #[test]
+    fn dma1_sad_keeps_28_bits() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut emu = Emu::new(&cart, None);
+        emu.bus.write32(0x0300_0000, 0x1122_3344);
+        emu.bus.write32(0x0300_0010, 0);
+        emu.bus.write32(0x0400_00BC, 0x0300_0000);
+        emu.bus.write32(0x0400_00C0, 0x0300_0010);
+        emu.bus.write16(0x0400_00C4, 1);
+        emu.bus.write16(0x0400_00C6, 0x8400);
+        assert_eq!(emu.bus.read32(0x0300_0010), 0x1122_3344);
+        assert_eq!(emu.bus.dma.ch[1].src & 0x0F00_0000, 0x0300_0000 & 0x0F00_0000);
     }
 }

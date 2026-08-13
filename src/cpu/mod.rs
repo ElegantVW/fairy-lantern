@@ -583,6 +583,35 @@ mod tests {
     }
 
     #[test]
+    fn msr_cpsr_does_not_set_thumb() {
+        // AL MSR CPSR_c, #0x3F  — SYS + T. Hardware ignores T on MSR.
+        let cart = cart_with(&[0xE321_F03F]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        cpu.cpsr.thumb = false;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert!(!cpu.cpsr.thumb, "MSR must not enter Thumb");
+        assert_eq!(cpu.cpsr.mode, 0x1F);
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn usr_msr_cannot_change_mode() {
+        // AL MSR CPSR_c, #0x13  from USR
+        let cart = cart_with(&[0xE321_F013]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x10);
+        cpu.cpsr.irq_disable = false;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.cpsr.mode, 0x10, "USR cannot MSR the control field");
+        assert!(!cpu.cpsr.irq_disable);
+    }
+
+    #[test]
     fn msr_imm_sets_sys_mode() {
         // AL MSR CPSR_c, #0x1F  (System, I/F clear)
         let cart = cart_with(&[0xE321_F01F]);
@@ -762,6 +791,96 @@ mod tests {
         cpu.set_pc(0x0300_0000);
         cpu.step(&mut bus);
         assert_eq!(cpu.r[0], 0x3400_0012, "Thumb unaligned LDRH is 32-bit ROR 8");
+    }
+
+    #[test]
+    fn thumb_ldmia_skips_writeback_when_rb_in_list() {
+        // LDMIA r0!, {r0, r1}  — r0 must keep the loaded word, not r0+8.
+        let mut mem = vec![0u8; 0x100];
+        mem[0..2].copy_from_slice(&0xC803u16.to_le_bytes());
+        let cart = cart_with(&[]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.iwram[..mem.len()].copy_from_slice(&mem);
+        bus.write32(0x0300_0010, 0x1111_1111);
+        bus.write32(0x0300_0014, 0x2222_2222);
+        cpu.cpsr.thumb = true;
+        cpu.r[0] = 0x0300_0010;
+        cpu.set_pc(0x0300_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[0], 0x1111_1111, "loaded value wins over writeback");
+        assert_eq!(cpu.r[1], 0x2222_2222);
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn arm_ldm_skips_writeback_when_rn_in_list() {
+        // LDMIA r0!, {r0, r1}
+        let cart = cart_with(&[0xE8B0_0003]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.write32(0x0300_0010, 0x1111_1111);
+        bus.write32(0x0300_0014, 0x2222_2222);
+        cpu.set_mode(0x1F);
+        cpu.r[0] = 0x0300_0010;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[0], 0x1111_1111, "loaded value wins over writeback");
+        assert_eq!(cpu.r[1], 0x2222_2222);
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn arm_stm_stores_old_base_when_rn_first() {
+        // STMIA r0!, {r0, r1}
+        let cart = cart_with(&[0xE8A0_0003]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        cpu.r[0] = 0x0300_0020;
+        cpu.r[1] = 0xABCD_0001;
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(bus.read32(0x0300_0020), 0x0300_0020, "first is old base");
+        assert_eq!(bus.read32(0x0300_0024), 0xABCD_0001);
+        assert_eq!(cpu.r[0], 0x0300_0028);
+    }
+
+    #[test]
+    fn thumb_ldrh_reg_unaligned_rors() {
+        // LDRH r0, [r1, r2]
+        let mut mem = vec![0u8; 0x100];
+        mem[0..2].copy_from_slice(&0x5A88u16.to_le_bytes());
+        let cart = cart_with(&[]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.iwram[..mem.len()].copy_from_slice(&mem);
+        bus.write16(0x0300_0010, 0x1234);
+        cpu.cpsr.thumb = true;
+        cpu.r[1] = 0x0300_0011;
+        cpu.r[2] = 0;
+        cpu.set_pc(0x0300_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[0], 0x3400_0012);
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn thumb_stmia_always_writebacks() {
+        // STMIA r0!, {r1}  — r0 advances even though r0 is not stored.
+        let mut mem = vec![0u8; 0x100];
+        mem[0..2].copy_from_slice(&0xC002u16.to_le_bytes());
+        let cart = cart_with(&[]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.iwram[..mem.len()].copy_from_slice(&mem);
+        cpu.cpsr.thumb = true;
+        cpu.r[0] = 0x0300_0020;
+        cpu.r[1] = 0xABCD_EF01;
+        cpu.set_pc(0x0300_0000);
+        cpu.step(&mut bus);
+        assert_eq!(bus.read32(0x0300_0020), 0xABCD_EF01);
+        assert_eq!(cpu.r[0], 0x0300_0024);
     }
 
     #[test]
