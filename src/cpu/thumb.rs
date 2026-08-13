@@ -573,8 +573,7 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
         return 1;
     }
 
-    cpu.unknown_ops = cpu.unknown_ops.wrapping_add(1);
-    cpu.last_unknown = op;
+    cpu.note_unknown(op, true);
     1
 }
 

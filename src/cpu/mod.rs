@@ -281,10 +281,29 @@ impl Cpu {
         self.cpsr = spsr;
     }
 
+    pub fn note_unknown(&mut self, op: u32, thumb: bool) {
+        self.unknown_ops = self.unknown_ops.wrapping_add(1);
+        self.last_unknown = op;
+        if self.unknown_ops <= 8 {
+            let pc = if thumb {
+                self.r[15].wrapping_sub(2)
+            } else {
+                self.r[15].wrapping_sub(4)
+            };
+            eprintln!(
+                "  unk_op #{} pc={pc:08X} op={op:08X} {}",
+                self.unknown_ops,
+                if thumb { "thumb" } else { "arm" }
+            );
+        }
+    }
+
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
         if self.halted {
             return 1;
         }
+        bus.exec_pc = self.r[15];
+        bus.dbg_pc = self.r[15];
         // HLE BIOS IRQ epilogue
         if !self.cpsr.thumb && self.r[15] == BIOS_IRQ_RETURN {
             return crate::irq::hle_irq_return(self, bus);

@@ -33,12 +33,18 @@ impl Slot {
 }
 
 /// True if `a` should be drawn in front of `b`.
+/// Same priority + same layer: the incoming pixel wins. Callers paint
+/// back-to-front (BG0 then BG1…; OAM 127 then 0), so this is “later
+/// draw is in front.” Gen3 HP bars are prio-1 OBJ on top of the prio-1
+/// healthbox; lower OAM index must replace the box in the trough.
 #[inline]
 fn in_front(a: Slot, b: Slot) -> bool {
     if a.prio != b.prio {
         a.prio < b.prio
-    } else {
+    } else if a.layer != b.layer {
         a.layer < b.layer
+    } else {
+        true
     }
 }
 
@@ -300,12 +306,13 @@ fn mark_obj_window(bus: &Bus, y: usize, dispcnt: u16, out: &mut [bool; WIDTH]) {
         let (ow, oh) = obj_dims(shape, size);
         let (dw, dh) = if double { (ow * 2, oh * 2) } else { (ow, oh) };
         let oy = attr0 & 0xFF;
-        let y_signed = if oy > 160 { oy as i32 - 256 } else { oy as i32 };
+        let y_signed = if oy >= 160 { oy as i32 - 256 } else { oy as i32 };
         if (y as i32) < y_signed || (y as i32) >= y_signed + dh as i32 {
             continue;
         }
         let ox = attr1 & 0x1FF;
-        let x_signed = if ox >= 240 { ox as i32 - 512 } else { ox as i32 };
+        // X is 9-bit signed (256..511 → -256..-1), same as composite_sprites.
+        let x_signed = if ox >= 256 { ox as i32 - 512 } else { ox as i32 };
         let color256 = attr0 & (1 << 13) != 0;
         let tile = (attr2 & 0x3FF) as usize;
         let pal_bank = ((attr2 >> 12) & 0xF) as usize;

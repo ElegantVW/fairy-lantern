@@ -36,8 +36,7 @@ fn dispatch(cpu: &mut Cpu, bus: &mut Bus, num: u8) {
         0x06 => div(cpu),
         0x07 => div_arm(cpu),
         0x08 => {
-            let v = cpu.r[0] as u64;
-            cpu.r[0] = (v as f64).sqrt() as u32;
+            cpu.r[0] = isqrt_u32(cpu.r[0]);
         }
         0x09 => arctan(cpu),
         0x0A => arctan2(cpu),
@@ -88,6 +87,30 @@ fn dispatch(cpu: &mut Cpu, bus: &mut Bus, num: u8) {
             bus.last_swi_unknown = num;
         }
     }
+}
+
+/// SWI 0x08 Sqrt — integer square root of r0 (unsigned), result in r0.
+/// Bit-by-bit; `f64` can round a near-integer up and then truncate wrong.
+fn isqrt_u32(n: u32) -> u32 {
+    if n <= 1 {
+        return n;
+    }
+    let mut rem = n;
+    let mut root = 0u32;
+    let mut bit = 1u32 << 30;
+    while bit > rem {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if rem >= root + bit {
+            rem -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    root
 }
 
 fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
@@ -582,6 +605,22 @@ mod tests {
             inner_name: None,
         };
         (Cpu::new(), Bus::new(&cart, None))
+    }
+
+    #[test]
+    fn sqrt_is_integer_floor() {
+        assert_eq!(isqrt_u32(0), 0);
+        assert_eq!(isqrt_u32(1), 1);
+        assert_eq!(isqrt_u32(3), 1);
+        assert_eq!(isqrt_u32(4), 2);
+        assert_eq!(isqrt_u32(10), 3);
+        assert_eq!(isqrt_u32(0xFFFF), 0xFF);
+        assert_eq!(isqrt_u32(0x1_0000), 0x100);
+        assert_eq!(isqrt_u32(u32::MAX), 0xFFFF);
+        let (mut cpu, mut bus) = harness();
+        cpu.r[0] = 200;
+        super::dispatch(&mut cpu, &mut bus, 0x08);
+        assert_eq!(cpu.r[0], 14);
     }
 
     #[test]

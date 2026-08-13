@@ -209,6 +209,83 @@ mod tests {
         assert_eq!(bus.dispstat() & 2, 0, "HBlank cleared on the next line");
     }
 
+    fn put_obj_tile_solid(bus: &mut Bus, tile: usize, nibble: u8) {
+        let off = 0x10000 + tile * 32;
+        let b = nibble | (nibble << 4);
+        for i in 0..32 {
+            bus.vram[off + i] = b;
+        }
+    }
+
+    fn oam_sprite(bus: &mut Bus, i: usize, y: u8, attr0_hi: u8, x: u16, attr1_hi: u8, attr2: u16) {
+        let o = i * 8;
+        let a0 = u16::from(y) | (u16::from(attr0_hi) << 8);
+        let a1 = (x & 0x1FF) | (u16::from(attr1_hi) << 8);
+        bus.oam[o..o + 2].copy_from_slice(&a0.to_le_bytes());
+        bus.oam[o + 2..o + 4].copy_from_slice(&a1.to_le_bytes());
+        bus.oam[o + 4..o + 6].copy_from_slice(&attr2.to_le_bytes());
+    }
+
+    #[test]
+    fn obj_32x8_healthbar_is_visible() {
+        // Gen3 HP bar: 32×8, 4bpp, 1D mapping, priority 1.
+        let mut bus = empty_bus();
+        bus.write16(0x0400_0000, (1 << 12) | (1 << 6)); // OBJ on, 1D
+        put_obj_tile_solid(&mut bus, 0, 1);
+        put_obj_tile_solid(&mut bus, 1, 1);
+        put_obj_tile_solid(&mut bus, 2, 1);
+        put_obj_tile_solid(&mut bus, 3, 1);
+        // OBJ pal 0, color 1 = red
+        bus.pal[0x200 + 2] = 0x1F;
+        bus.pal[0x200 + 3] = 0x00;
+        // ATTR0: y=20, shape=horizontal; ATTR1: x=10, size=32x8
+        oam_sprite(&mut bus, 0, 20, 1 << 6, 10, 1 << 6, 0);
+        let mut frame = vec![0u16; WIDTH * HEIGHT];
+        render::render_scanline(&bus, 20, &mut frame);
+        let px = frame[20 * WIDTH + 12];
+        assert_ne!(px & 0x7FFF, 0, "32x8 bar pixel must be lit, got {px:04X}");
+        assert_eq!(px & 0x1F, 0x1F, "bar uses OBJ pal color 1 (red)");
+    }
+
+    #[test]
+    fn obj_same_prio_low_index_covers_box() {
+        // Healthbox (OAM 5) and HP bar (OAM 0), both priority 1.
+        // Lower OAM index is in front (GBATEK). The bar must win the trough.
+        let mut bus = empty_bus();
+        bus.write16(0x0400_0000, (1 << 12) | (1 << 6));
+        put_obj_tile_solid(&mut bus, 0, 1); // bar: pal idx 1 = red
+        put_obj_tile_solid(&mut bus, 8, 2); // box: pal idx 2 = green
+        bus.pal[0x200 + 2] = 0x1F;
+        bus.pal[0x200 + 3] = 0x00;
+        bus.pal[0x200 + 4] = 0xE0;
+        bus.pal[0x200 + 5] = 0x03;
+        // OAM 5: 64×64 square at (10,20), tile 8
+        oam_sprite(&mut bus, 5, 20, 0, 10, 3 << 6, 8);
+        // OAM 0: 32×8 bar at (10,20), tile 0
+        oam_sprite(&mut bus, 0, 20, 1 << 6, 10, 1 << 6, 0);
+        let mut frame = vec![0u16; WIDTH * HEIGHT];
+        render::render_scanline(&bus, 20, &mut frame);
+        let px = frame[20 * WIDTH + 12];
+        assert_eq!(px & 0x1F, 0x1F, "HP bar (low OAM) must cover the box, got {px:04X}");
+    }
+
+    #[test]
+    fn obj_64x32_healthbox_is_visible() {
+        let mut bus = empty_bus();
+        bus.write16(0x0400_0000, (1 << 12) | (1 << 6));
+        for t in 0..32 {
+            put_obj_tile_solid(&mut bus, t, 2);
+        }
+        bus.pal[0x200 + 4] = 0xE0; // green-ish
+        bus.pal[0x200 + 5] = 0x03;
+        // y=72, x=126, shape=horizontal size=64x32
+        oam_sprite(&mut bus, 0, 72, 1 << 6, 126, 3 << 6, 0);
+        let mut frame = vec![0u16; WIDTH * HEIGHT];
+        render::render_scanline(&bus, 80, &mut frame);
+        let px = frame[80 * WIDTH + 140];
+        assert_ne!(px & 0x7FFF, 0, "64x32 box pixel must be lit, got {px:04X}");
+    }
+
     #[test]
     fn frame_still_228_lines() {
         let mut ppu = Ppu::new();

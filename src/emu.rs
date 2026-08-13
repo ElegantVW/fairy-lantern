@@ -222,6 +222,7 @@ impl Emu {
             }
         }
         self.bus.set_keys_pressed(0);
+        dump_oam_stat(&self.bus, frames);
         if std::env::var_os("FAIRY_DUMP_IWRAM").is_some() {
             let w = &self.bus.iwram[0x62A0..0x68C0];
             eprint!("MIXWIN:");
@@ -316,6 +317,67 @@ fn dump_mix_stat(bus: &Bus, frames: u32) {
         }
     }
     eprintln!();
+}
+
+/// Live OAM: Y, X, shape/size, affine, mosaic, prio, tile. 32×8 (shape1 size1)
+/// is the Gen3 HP bar; 64×32 (shape1 size3) / square 64 is the healthbox.
+pub fn dump_oam_stat(bus: &Bus, frames: u32) {
+    let dispcnt = bus.dispcnt();
+    let winin = bus.read16(0x0400_0048);
+    let winout = bus.read16(0x0400_004A);
+    let bldcnt = bus.read16(0x0400_0050);
+    let mosaic = bus.read16(0x0400_004C);
+    let win0h = bus.read16(0x0400_0040);
+    let win0v = bus.read16(0x0400_0044);
+    let obj_on = dispcnt & (1 << 12) != 0;
+    let one_d = dispcnt & (1 << 6) != 0;
+    eprint!(
+        "OAMSTAT f{frames} dispcnt={dispcnt:04X} mode={} obj={} map={} win0={} win1={} objwin={} \
+         winin={winin:04X} winout={winout:04X} win0h={win0h:04X} win0v={win0v:04X} \
+         bld={bldcnt:04X} mos={mosaic:04X}",
+        dispcnt & 7,
+        obj_on as u8,
+        if one_d { "1D" } else { "2D" },
+        (dispcnt & (1 << 13) != 0) as u8,
+        (dispcnt & (1 << 14) != 0) as u8,
+        (dispcnt & (1 << 15) != 0) as u8,
+    );
+    eprintln!();
+    let mut live = 0u32;
+    for i in 0..128 {
+        let o = i * 8;
+        let a0 = u16::from_le_bytes([bus.oam[o], bus.oam[o + 1]]);
+        let a1 = u16::from_le_bytes([bus.oam[o + 2], bus.oam[o + 3]]);
+        let a2 = u16::from_le_bytes([bus.oam[o + 4], bus.oam[o + 5]]);
+        let y = a0 & 0xFF;
+        let x = a1 & 0x1FF;
+        let affine = a0 & (1 << 8) != 0;
+        let hide = !affine && a0 & (1 << 9) != 0;
+        if hide {
+            continue;
+        }
+        // Dummy off-screen slot (y=160, x=240+) used by unused OAM
+        if y == 160 && x >= 240 {
+            continue;
+        }
+        live += 1;
+        let shape = (a0 >> 14) & 3;
+        let size = (a1 >> 14) & 3;
+        let gfx = (a0 >> 10) & 3;
+        let mosaic = a0 & (1 << 12) != 0;
+        let bpp8 = a0 & (1 << 13) != 0;
+        let prio = (a2 >> 10) & 3;
+        let tile = a2 & 0x3FF;
+        let pal = (a2 >> 12) & 0xF;
+        eprintln!(
+            "  oam{i:02} y={y:3} x={x:3} sh={shape} sz={size} gfx={gfx} \
+             af={} mos={} c{} prio={prio} tile={tile:03X} pal={pal}",
+            affine as u8,
+            mosaic as u8,
+            if bpp8 { 8 } else { 4 },
+        );
+    }
+    eprintln!("  oam_live={live}");
 }
 
 /// Headless key automation for advancing title screens / menus / overworld.

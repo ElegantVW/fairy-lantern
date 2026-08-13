@@ -63,6 +63,8 @@ pub struct Bus {
     pub dbg_evt: u64,
     /// Temporary: last CPU PC (set each step; printed in DMA trace).
     pub dbg_pc: u32,
+    /// PC of the instruction currently executing (BIOS open-bus gate).
+    pub exec_pc: u32,
     pub rtc: Rtc,
     pub swi_counts: [u32; 256],
     pub swi_unknown: u32,
@@ -115,6 +117,7 @@ impl Bus {
             sound_driver: SoundDriver::new(),
             dbg_evt: 0,
             dbg_pc: 0,
+            exec_pc: 0x0800_0000,
             rtc: Rtc::new(Rtc::detect(&cart.data)),
             swi_counts: [0; 256],
             swi_unknown: 0,
@@ -213,9 +216,14 @@ impl Bus {
         let a = addr;
         let v = match a >> 24 {
             0x00 => {
-                // BIOS is only fully visible while executing from BIOS; otherwise
-                // open-bus (HLE bios image is empty anyway).
-                self.bios.get((a & 0x3FFF) as usize).copied().unwrap_or(0)
+                // GBATEK: BIOS is readable only while executing from BIOS.
+                // ROM/IWRAM code (and DMA while PC is outside) sees open bus —
+                // not the image. Stops a supplied BIOS dump from being copied.
+                if self.exec_pc >> 24 == 0 {
+                    self.bios.get((a & 0x3FFF) as usize).copied().unwrap_or(0)
+                } else {
+                    return self.open_bus8(a);
+                }
             }
             0x02 => self.ewram[(a as usize) & (EWRAM_SIZE - 1)],
             0x03 => self.iwram[(a as usize) & (IWRAM_SIZE - 1)],
@@ -940,6 +948,23 @@ fn vram_index(addr: u32) -> usize {
 mod tests {
     use super::*;
     use crate::cart::Cart;
+
+    #[test]
+    fn bios_hidden_when_pc_outside() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut bus = Bus::new(&cart, Some(vec![0xEA; BIOS_SIZE]));
+        bus.exec_pc = 0x0800_0000;
+        assert_eq!(bus.read8(0), 0, "ROM code must not dump BIOS");
+        bus.exec_pc = 0x0000_0138;
+        assert_eq!(bus.read8(0), 0xEA, "BIOS code can read the image");
+    }
 
     #[test]
     fn sequential_rom_fetch_cheaper_than_n() {

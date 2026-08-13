@@ -53,7 +53,7 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
 
     println!("✦ Fairy Lantern lit — {title}");
     println!("  arrows/WASD move · Z/Space=A · X=B · Enter=Start · P pause · Esc snuff");
-    println!("  F5 savestate · F7 loadstate · battery autosaves to .sav · audio+clock on");
+    println!("  F5 savestate · F7 loadstate · F8 OAM dump · battery autosaves to .sav · audio+clock on");
     println!("  audio: DirectSound A+B (mp2k L/R)  ·  FAIRY_DS=a|b  ·  FAIRY_AUDIO=sine fairy  → beep");
 
     let mut next_frame = Instant::now();
@@ -101,6 +101,17 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
                 }
             } else {
                 status = "no savestate path".into();
+            }
+        }
+        if window.is_key_pressed(Key::F8, KeyRepeat::No) {
+            crate::emu::dump_oam_stat(&emu.bus, frame_n as u32);
+            let ppm = std::env::temp_dir().join("fairy-lantern-oam.ppm");
+            match crate::video::write_ppm(&ppm, &emu.ppu.frame) {
+                Ok(()) => {
+                    status = format!("OAM dump → stderr + {}", ppm.display());
+                    eprintln!("  {status}");
+                }
+                Err(e) => status = format!("OAM ppm failed: {e}"),
             }
         }
 
