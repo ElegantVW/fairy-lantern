@@ -511,16 +511,31 @@ impl Bus {
             }
         }
         let v = u16::from_le_bytes([self.read8(a), self.read8(a.wrapping_add(1))]);
-        // Game Pak is a 16-bit bus. After a halfword fetch/load the 32-bit
-        // data bus holds that halfword in *both* halves (GBATEK open bus).
-        // FRLG/LC call DestroySpriteAndFreeResources(NULL) on first markings
-        // sprite; they LDRB inUse from 0000003E. A stale high halfword with
-        // bit0 set made that look in-use and the tile-free loop never ended.
-        if matches!(a >> 24, 0x08 | 0x09 | 0x0A | 0x0B | 0x0C) {
-            let d = v as u32;
-            self.last_bus.set(d | (d << 16));
-        }
+        self.latch_open_bus16(a, v);
         v
+    }
+
+    /// After a 16-bit read: latch the value the next unused-region read will see.
+    /// 16-bit buses (ROM / pal / VRAM / OAM) duplicate the halfword. 32-bit
+    /// buses (EWRAM / IWRAM) keep the aligned word.
+    fn latch_open_bus16(&self, addr: u32, v: u16) {
+        match addr >> 24 {
+            0x05 | 0x06 | 0x07 | 0x08 | 0x09 | 0x0A | 0x0B | 0x0C => {
+                let d = v as u32;
+                self.last_bus.set(d | (d << 16));
+            }
+            0x02 | 0x03 => {
+                let a = addr & !3;
+                let w = u32::from_le_bytes([
+                    self.read8(a),
+                    self.read8(a.wrapping_add(1)),
+                    self.read8(a.wrapping_add(2)),
+                    self.read8(a.wrapping_add(3)),
+                ]);
+                self.last_bus.set(w);
+            }
+            _ => {}
+        }
     }
 
     pub fn write32_raw(&mut self, addr: u32, val: u32) {
@@ -1426,6 +1441,32 @@ mod tests {
         assert_eq!(bus.read8(0x0000_003E), 0x01);
         assert_eq!(bus.read8(0x0000_003F), 0x78);
         assert_eq!(bus.read32(0x0000_000C), 0x7801_7801);
+    }
+
+    #[test]
+    fn iwram_halfword_open_bus_is_the_aligned_word() {
+        let mut bus = tiny_bus();
+        bus.write32(0x0300_0000, 0xA1B2_C3D4);
+        let _ = bus.read16(0x0300_0002);
+        assert_eq!(
+            bus.read8(0x0000_0000),
+            0xD4,
+            "IWRAM is a 32-bit bus: unused read sees the whole word"
+        );
+        assert_eq!(bus.read8(0x0000_0001), 0xC3);
+        assert_eq!(bus.read8(0x0000_0002), 0xB2);
+        assert_eq!(bus.read8(0x0000_0003), 0xA1);
+    }
+
+    #[test]
+    fn vram_halfword_open_bus_duplicates() {
+        let mut bus = tiny_bus();
+        bus.write16(0x0600_0000, 0x1F3F);
+        let _ = bus.read16(0x0600_0000);
+        assert_eq!(bus.read8(0x0000_0000), 0x3F);
+        assert_eq!(bus.read8(0x0000_0001), 0x1F);
+        assert_eq!(bus.read8(0x0000_0002), 0x3F);
+        assert_eq!(bus.read8(0x0000_0003), 0x1F);
     }
 
     #[test]

@@ -28,7 +28,7 @@ completeness claim.
 |---|---|
 | Version | `Cargo.toml` 0.10.0 |
 | Restore | tag `sacred/sound-working`, branch `checkpoint/sound-working` (`7816e1b`) |
-| `cargo test --bin fairy` | 102 unit tests passed |
+| `cargo test --bin fairy` | 104 unit tests passed |
 | CI | `rust-toolchain.toml` + `.github/workflows/test.yml` |
 | `faeos/fairy-lantern` | stale — do not edit |
 | Docs | this file + [AGENTS.md](../AGENTS.md) + [SOUND_AUDIT.md](SOUND_AUDIT.md) |
@@ -78,7 +78,7 @@ Affine identity/PD hacks are **off** by default. Fight HP bars work (`a3958ac`).
 | 21 | `FAIRY_DMA_TRACE` env on hot path | **Fixed** (`fairy_trace()` OnceLock) |
 | 22 | LC PCs hardcoded in `cpu/mod.rs` | **Partial** — `cfg(debug)` + `FAIRY_DMA_TRACE`; gone from release step |
 | 23 | Docs contradict each other | **Fixed** (this refresh) |
-| 24 | Almost no regression tests | **Partial** — 102 unit tests; still no PPU goldens / committed PCM fixture |
+| 24 | Almost no regression tests | **Partial** — 104 unit tests; still no PPU goldens / committed PCM fixture |
 | 25 | No CI / toolchain pin | **Partial** — `rust-toolchain.toml` + `.github/workflows/test.yml` |
 | 26 | `faeos/fairy-lantern` will rot | **Open** — treat as dead; do not edit |
 | 27 | Host is `aplay`/`pw-cat` | **Partial** — `pw-cat` 48 kHz stereo, no reopen; still Linux-only |
@@ -112,6 +112,7 @@ Plus (not in the original list):
 - Data-processing shift-by-register is +1 I-cycle.
 - Modes 3–5 honor WININ/OUT BG2 bits; WININ/WINOUT/BLDCNT/TMxCNT unused bits masked.
 - ROM 16-bit access latches open bus as `half | half<<16` (FRLG `DestroySprite(NULL)`).
+- IWRAM/EWRAM 16-bit reads latch the aligned 32-bit word; VRAM/PAL/OAM duplicate the halfword.
 - Gamepad / `KEYINPUT` from a host controller — **Deferred**. Keyboard only
   (`play::poll_keys`). minifb has no pad API. When LC’s campaign gate is done,
   map gilrs/evdev onto the same 10 bits; keep keys; no analog into KEYINPUT.
