@@ -1420,7 +1420,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn rom_halfword_open_bus_duplicates_on_both_halves() {
         let mut data = vec![0u8; 0x200];
         data[0..2].copy_from_slice(&0x7801u16.to_le_bytes());
