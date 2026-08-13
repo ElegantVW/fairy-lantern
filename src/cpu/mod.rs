@@ -16,10 +16,11 @@ pub fn fairy_trace() -> bool {
     *FAIRY_TRACE_ONCE.get_or_init(|| std::env::var_os("FAIRY_DMA_TRACE").is_some())
 }
 
-/// When false (`FAIRY_ACCURATE_AFFINE=1`), skip Liquid Crystal affine identity/PD hacks.
+/// Liquid Crystal identity/PD matrix rewrites. **Off** by default (hardware).
+/// `FAIRY_AFFINE_COMPAT=1` restores the old “empty matrix → identity” path.
 pub fn affine_compat() -> bool {
     static ONCE: OnceLock<bool> = OnceLock::new();
-    *ONCE.get_or_init(|| std::env::var_os("FAIRY_ACCURATE_AFFINE").is_none())
+    *ONCE.get_or_init(|| std::env::var_os("FAIRY_AFFINE_COMPAT").is_some())
 }
 
 /// HLE BIOS address: IRQ epilogue (`ldmfd …; subs pc, lr, #4`).
@@ -609,6 +610,15 @@ mod tests {
         cpu.step(&mut bus);
         assert_eq!(cpu.cpsr.mode, 0x10, "USR cannot MSR the control field");
         assert!(!cpu.cpsr.irq_disable);
+    }
+
+    #[test]
+    fn affine_compat_is_opt_in() {
+        assert_eq!(
+            affine_compat(),
+            std::env::var_os("FAIRY_AFFINE_COMPAT").is_some(),
+            "hacks stay off unless FAIRY_AFFINE_COMPAT is set"
+        );
     }
 
     #[test]

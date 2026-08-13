@@ -748,8 +748,8 @@ impl Bus {
                     self.write16_raw(a, val);
                     let mode = val & 7;
                     if crate::cpu::affine_compat() && (mode == 1 || mode == 2) {
-                        // Liquid Crystal / battle HUD: games often skip writing PA/PD.
-                        // Disable with FAIRY_ACCURATE_AFFINE=1.
+                        // Opt-in LC / battle-HUD patch. Default is hardware
+                        // (zero PA stays zero). FAIRY_AFFINE_COMPAT=1.
                         Self::ensure_affine_identity(self, 2);
                         if mode == 2 {
                             Self::ensure_affine_identity(self, 3);

@@ -57,6 +57,7 @@ fn write_into(emu: &Emu, state: &Path, f: &mut impl Write) -> Result<()> {
     for key in [
         "FAIRY_DS",
         "FAIRY_AUDIO",
+        "FAIRY_AFFINE_COMPAT",
         "FAIRY_ACCURATE_AFFINE",
         "FAIRY_DMA_TRACE",
         "FAIRY_MIX_STAT",

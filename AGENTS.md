@@ -13,7 +13,8 @@ HALTCNT Halt, 2-cycle IRQ delay.
 
 LC (BPRE) boots to the overworld, plays intro/title through DirectSound A+B,
 can finish an in-game FLASH save, and can fight (HUD, EXP). Affine identity/PD
-hacks stay **on** by default until the LC campaign is walked further.
+hacks are **off** by default (hardware matrix). `FAIRY_AFFINE_COMPAT=1` restores
+the old rewrite if a battle HUD/camera collapses.
 
 This is **not** a commercial GBA emulator and **not** mGBA-class. Remaining
 holes: [docs/AUDIT.md](docs/AUDIT.md).
@@ -68,7 +69,7 @@ data-processing immediate decoder, so reverb wrote `r5+6` instead of
 | `FAIRY_DUMP_IWRAM=1` | hexdump mix window at end of `run` |
 | `FAIRY_DMA_TRACE=1` | DMA / FIFO / selected IWRAM traces |
 | `FAIRY_DEBUG=1` | PPU regs on headless `run` |
-| `FAIRY_ACCURATE_AFFINE=1` | disable LC affine identity/PD hacks |
+| `FAIRY_AFFINE_COMPAT=1` | restore LC affine identity/PD rewrites (off by default) |
 
 `fairy tone` goes through the same ring + resampler as a ROM (`--direct` skips it).
 
@@ -79,8 +80,8 @@ FIFOs, Flash/EEPROM FSM, RTC GPIO. `FAELST04`–`02` still load (those machines
 start idle). F5 also writes `stem.ppm` and `stem.dbg.txt` (host RSS/CPU,
 OAM, pals, sound). Copies: `/tmp/fairy-lantern-state.ppm` and `.dbg.txt`.
 
-Affine identity/PD caps stay on for Liquid Crystal unless
-`FAIRY_ACCURATE_AFFINE=1`. Try that flag if a **battle** HUD/camera looks wrong.
+Affine identity/PD rewrites are **off**. If a **battle** HUD/camera collapses,
+try `FAIRY_AFFINE_COMPAT=1`.
 
 ## Input (now / later)
 

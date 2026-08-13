@@ -43,7 +43,7 @@ ROMs are user-supplied only (`.gba` / `.zip` containing a `.gba`).
 |-----|--------|
 | `FAIRY_DS=a` / `b` | FIFO A only or B only (default is both) |
 | `FAIRY_AUDIO=sine` | 440 Hz instead of the game mix |
-| `FAIRY_ACCURATE_AFFINE=1` | disable LC affine identity/PD hacks |
+| `FAIRY_AFFINE_COMPAT=1` | restore LC affine identity/PD rewrites (off by default) |
 
 ## Core surface
 

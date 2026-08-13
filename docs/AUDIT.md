@@ -15,8 +15,8 @@ save, and can fight (HP/EXP HUD). CPU, IRQ, timers, FIFO DMA, and the ARM
 `STRB [Rn, Rm]` addressing-mode-2 bug were the load-bearing fixes.
 
 It is **not** a commercial GBA emulator and **not** mGBA-class. Unknown opcodes
-still NOP (first 8 log), PSG is unproven on LC, affine identity/PD hacks stay
-default-on, there are no PPU goldens, the host is Linux `pw-cat`, and only one
+still NOP (first 8 log), PSG is unproven on LC, affine identity/PD hacks are
+off by default (`FAIRY_AFFINE_COMPAT=1` restores them), there are no PPU goldens, the host is Linux `pw-cat`, and only one
 title has been walked. SWI enters SVC for HLE; untagged carts do not invent SRAM.
 
 Use it for titles that have been walked through. Do not read “v0.10” as a
@@ -28,7 +28,7 @@ completeness claim.
 |---|---|
 | Version | `Cargo.toml` 0.10.0 |
 | Restore | tag `sacred/sound-working`, branch `checkpoint/sound-working` (`7816e1b`) |
-| `cargo test --bin fairy` | 99 unit tests passed |
+| `cargo test --bin fairy` | 100 unit tests passed |
 | CI | `rust-toolchain.toml` + `.github/workflows/test.yml` |
 | `faeos/fairy-lantern` | stale — do not edit |
 | Docs | this file + [AGENTS.md](../AGENTS.md) + [SOUND_AUDIT.md](SOUND_AUDIT.md) |
@@ -48,7 +48,8 @@ ROM: user-supplied BPRE, not in repo.
 | PSG | 0 | 0 |
 | intro | song buried under star wash | listenable; star is a one-shot |
 
-Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`).
+Affine identity/PD hacks are **off** by default. Fight HP bars work (`a3958ac`).
+`FAIRY_AFFINE_COMPAT=1` restores the old matrix rewrite.
 
 ## Finding status
 
@@ -66,7 +67,7 @@ Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`
 | 10 | SWI never enters SVC | **Fixed** — enter SVC + I + ARM, HLE, restore SPSR (SoftReset may stay out) |
 | 11 | SoftReset / Sqrt / RegisterRamReset | **Fixed** — SoftReset honors `03007FFA` (ROM vs EWRAM) and wipes 200h; integer Sqrt; IWRAM keeps last 0x200; bit7 clears IO not CPU |
 | 12 | HBlank at end of 1232-cycle line | **Fixed** (`HBLANK_CYCLE = 1006`) |
-| 13 | Affine identity / PD caps | **Gated** — still default-on; `FAIRY_ACCURATE_AFFINE=1` disables |
+| 13 | Affine identity / PD caps | **Off** — hardware matrix by default; `FAIRY_AFFINE_COMPAT=1` restores LC rewrite |
 | 14 | DMA3 video capture | **Fixed** — special DMA3 one line per HBlank, VCOUNT 2..=161, off at 162 |
 | 15 | Timer overflow storms capped at 16 | **Fixed** — all overflows counted; cascade closed-form; IF raised once |
 | 16 | m4a BIOS HLE guess / fake PCM | **Stubbed** — no IWRAM writes; LC uses ROM mixer |
@@ -77,7 +78,7 @@ Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`
 | 21 | `FAIRY_DMA_TRACE` env on hot path | **Fixed** (`fairy_trace()` OnceLock) |
 | 22 | LC PCs hardcoded in `cpu/mod.rs` | **Partial** — `cfg(debug)` + `FAIRY_DMA_TRACE`; gone from release step |
 | 23 | Docs contradict each other | **Fixed** (this refresh) |
-| 24 | Almost no regression tests | **Partial** — 99 unit tests; still no PPU goldens / committed PCM fixture |
+| 24 | Almost no regression tests | **Partial** — 100 unit tests; still no PPU goldens / committed PCM fixture |
 | 25 | No CI / toolchain pin | **Partial** — `rust-toolchain.toml` + `.github/workflows/test.yml` |
 | 26 | `faeos/fairy-lantern` will rot | **Open** — treat as dead; do not edit |
 | 27 | Host is `aplay`/`pw-cat` | **Partial** — `pw-cat` 48 kHz stereo, no reopen; still Linux-only |
@@ -338,7 +339,7 @@ delay, HALTCNT, CI.
 Next:
 
 1. Play LC to Violet / Sprout / Falkner. Named bugs only (drain, fade, cry, `unk_op`).
-2. `FAIRY_ACCURATE_AFFINE=1` only after they approve — do not flip the default.
+2. Affine hacks are off. If a fight HUD/camera collapses, `FAIRY_AFFINE_COMPAT=1`.
 3. PPU golden frames + a tiny committed PCM fixture.
 4. Unknown opcodes: stop silent-NOP (log in the play window; UND later).
 5. Second owned ROM when they have one. Do not sync `faeos/fairy-lantern`.
