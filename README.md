@@ -9,10 +9,9 @@ Rust: own ARM7TDMI core, bus, PPU, and sound path. No mGBA, no libretro cores.
 
 ## Status
 
-v0.10.0 — Pokémon Liquid Crystal (BPRE) boots to the overworld with title art,
-dialogue, walking camera, and **listenable intro/title music**. DirectSound
-FIFOs A+B are mixed as the game programs them; the host plays 32768 Hz PWM
-held samples resampled to 48 kHz stereo.
+v0.10.0 — Pokémon Liquid Crystal (BPRE) boots, plays intro/title music, can
+**save in-game (FLASH 128K)**, and can fight (HP/EXP HUD). DirectSound FIFOs
+A+B are mixed as the game programs them; host is 32768 Hz PWM → 48 kHz stereo.
 
 This is a working from-scratch interpreter for the titles that have been
 walked through. It is not a completeness claim. Open holes:
@@ -28,10 +27,15 @@ fairy play game.gba
 | Key | Action |
 |-----|--------|
 | Arrows / WASD | D-pad |
-| Z / Space | A |
-| X | B |
-| Enter | Start |
-| P / F5 / F7 / Esc | Pause / savestate / load / quit |
+| Z / Space / J | A |
+| X / K | B |
+| Q / E | L / R |
+| Enter / RightShift | Start / Select |
+| P / F5 / F7 / F8 / Esc | Pause / savestate+shot+dbg / load / OAM dump / quit |
+
+Input is **keyboard only**. Gamepads are a later commercial goal (same 10-bit
+`KEYINPUT` mask; see [AGENTS.md](AGENTS.md) § Input). Do not start that work
+until the LC play-through gate is done.
 
 ROMs are user-supplied only (`.gba` / `.zip` containing a `.gba`).
 
@@ -47,13 +51,14 @@ ROMs are user-supplied only (`.gba` / `.zip` containing a `.gba`).
 - IRQ banking (USR/SYS, IRQ, SVC, FIQ, UND, ABT) + BIOS IRQ HLE + IntrWait/Halt
 - DMA immediate / VBlank / HBlank / FIFO special (DMA1/2). No DMA3 video capture.
 - Timers with prescale remainder + cascade
-- BIOS SWI: memory, decompress (LZ/RL/Huff), Div, ArcTan, AffineSet,
-  SoundBias; m4a SWIs are stubs (no fake IWRAM PCM)
+- BIOS SWI enters SVC then HLE (Div, Sqrt, decompress, AffineSet, …);
+  m4a SWIs stay stubs (no fake IWRAM PCM)
 - Sound FIFO A/B + dest bits + 50/100% + SOUNDBIAS clip; host `pw-cat`/`aplay`
   at 48 kHz stereo; silence on underrun
 - PPU Mode 0–5, priority composite, alpha + brightness, WIN0/1 + OBJ window,
   mosaic BG/OBJ, affine OBJ
-- FLASH1M / FLASH / SRAM battery + savestates (`FAELST04`) + EEPROM bit-bang
+- FLASH1M / FLASH / SRAM battery + savestates (`FAELST05`) + EEPROM bit-bang;
+  untagged carts do not invent SRAM
 - Keypad IRQ (KEYCNT), cartridge GPIO RTC (SIIRTC), GBA frame pacing (~59.73 Hz)
 - Sequential vs N-cycle ROM fetch waitstates; data waitstates on LDR/STR;
   open-bus on unmapped reads

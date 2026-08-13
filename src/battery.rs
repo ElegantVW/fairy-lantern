@@ -68,8 +68,9 @@ pub fn detect(rom: &[u8]) -> SaveType {
         // and auto-narrow on short address streams (see EepromChip).
         return SaveType::Eeprom8K;
     }
-    // Default: many homebrew / unknown — give SRAM so casual saves can work
-    SaveType::Sram(64 * 1024)
+    // Untagged carts: do not invent SRAM. Writing SRAM protocol onto Flash or
+    // EEPROM would corrupt a real battery. Homebrew must carry an SDK string.
+    SaveType::None
 }
 
 /// `.sav` next to the ROM, or under data dir if ROM path is weird.
@@ -141,6 +142,23 @@ impl FlashChip {
         }
     }
 
+    pub fn restore_fsm(&mut self, mode: u8, cmd_step: u8, bank: usize) {
+        self.mode = mode;
+        self.cmd_step = cmd_step;
+        self.bank = bank;
+    }
+
+    /// (mode, cmd_step, bank, manufacturer, device)
+    pub fn debug_fsm(&self) -> (u8, u8, usize, u8, u8) {
+        (
+            self.mode,
+            self.cmd_step,
+            self.bank,
+            self.manufacturer,
+            self.device,
+        )
+    }
+
     fn bank_base(&self) -> usize {
         // 128K: two 64K banks
         if self.data.len() >= 128 * 1024 {
@@ -166,8 +184,25 @@ impl FlashChip {
 
     pub fn write(&mut self, addr: u32, val: u8) -> bool {
         let off = (addr as usize) & 0xFFFF;
-        // Bank switch (128K): write bank to 0x0E000000 after unlock sequence varies;
-        // common: after 0xAA/0x55, command 0xB0 then write bank at 0x0000
+
+        // Program / bank-select consume the next write (no unlock prefix).
+        if self.mode == 3 {
+            let i = self.bank_base() + off;
+            if i < self.data.len() {
+                self.data[i] &= val; // flash programs 1→0
+            }
+            self.mode = 0;
+            self.cmd_step = 0;
+            return true;
+        }
+        if self.mode == 4 {
+            self.bank = (val & 1) as usize;
+            self.mode = 0;
+            self.cmd_step = 0;
+            return false;
+        }
+
+        // AMD unlock: [5555]=AA, [2AAA]=55, then the command byte.
         match self.cmd_step {
             0 if off == 0x5555 && val == 0xAA => {
                 self.cmd_step = 1;
@@ -179,77 +214,61 @@ impl FlashChip {
             }
             2 => {
                 self.cmd_step = 0;
-                match val {
-                    0x90 => {
-                        self.mode = 1; // ID
-                        return false;
-                    }
-                    0xF0 => {
+                // Second AA/55 after erase-prep (80h): 10h chip, 30h 4K sector.
+                // Must be handled here — the idle decoder used to swallow 10/30.
+                if self.mode == 2 {
+                    if val == 0x10 {
+                        self.data.fill(0xFF);
                         self.mode = 0;
-                        return false;
+                        return true;
                     }
-                    0x80 => {
-                        self.mode = 2; // erase prep
-                        return false;
+                    if val == 0x30 {
+                        let base = self.bank_base() + (off & !0xFFF);
+                        for b in self.data.iter_mut().skip(base).take(0x1000) {
+                            *b = 0xFF;
+                        }
+                        self.mode = 0;
+                        return true;
                     }
-                    0xA0 => {
-                        self.mode = 3; // program next byte
-                        return false;
-                    }
-                    0xB0 => {
-                        self.mode = 4; // bank
-                        return false;
-                    }
-                    _ => return false,
+                    self.mode = 0;
+                    return false;
                 }
-            }
-            _ => {}
-        }
-
-        if self.mode == 4 {
-            // bank select
-            self.bank = (val & 1) as usize;
-            self.mode = 0;
-            return false;
-        }
-        if self.mode == 3 {
-            let i = self.bank_base() + off;
-            if i < self.data.len() {
-                self.data[i] &= val; // flash programs 1→0
-            }
-            self.mode = 0;
-            return true;
-        }
-        if self.mode == 2 {
-            // erase commands: 0x30 sector, 0x10 chip after second unlock
-            if off == 0x5555 && val == 0xAA {
-                self.cmd_step = 1;
+                match val {
+                    0x90 => self.mode = 1, // ID
+                    0xF0 => self.mode = 0,
+                    0x80 => self.mode = 2, // erase prep
+                    0xA0 => self.mode = 3, // program next byte
+                    0xB0 => self.mode = 4, // bank
+                    _ => {}
+                }
                 return false;
             }
-            // simplify: any 0x30/0x10 erases whole chip or sector
-            if val == 0x10 || val == 0x30 {
-                if val == 0x10 {
-                    self.data.fill(0xFF);
-                } else {
-                    let base = self.bank_base() + (off & !0xFFF);
-                    for b in self.data.iter_mut().skip(base).take(0x1000) {
-                        *b = 0xFF;
-                    }
-                }
-                self.mode = 0;
-                return true;
+            _ => {
+                self.cmd_step = 0;
             }
         }
-        // raw write fallback (some homebrew)
-        if self.mode == 0 && self.cmd_step == 0 {
-            let i = self.bank_base() + off;
-            if i < self.data.len() {
-                self.data[i] = val;
-                return true;
-            }
+
+        // Many SDK drivers write F0 to leave ID without a full prefix.
+        if val == 0xF0 {
+            self.mode = 0;
+            self.cmd_step = 0;
         }
         false
     }
+}
+
+/// EEPROM serial engine (not the data array) for savestates.
+#[derive(Clone, Copy, Debug)]
+pub struct EepromFsm {
+    pub addr_bits: u8,
+    pub bits: u64,
+    pub bit_count: u8,
+    pub phase: u8,
+    pub dirty: bool,
+    pub read_stream: u128,
+    pub read_left: u8,
+    pub write_addr: u16,
+    pub write_buf: u64,
 }
 
 /// Serial EEPROM (512 B or 8 KiB) bit-bang on bus `0x0Dxxxxxx`.
@@ -305,6 +324,32 @@ impl EepromChip {
             SaveType::Eeprom8K => Some(Self::new(8 * 1024)),
             _ => None,
         }
+    }
+
+    pub fn snapshot_fsm(&self) -> EepromFsm {
+        EepromFsm {
+            addr_bits: self.addr_bits,
+            bits: self.bits,
+            bit_count: self.bit_count,
+            phase: self.phase,
+            dirty: self.dirty,
+            read_stream: self.read_stream,
+            read_left: self.read_left,
+            write_addr: self.write_addr,
+            write_buf: self.write_buf,
+        }
+    }
+
+    pub fn restore_fsm(&mut self, s: EepromFsm) {
+        self.addr_bits = s.addr_bits;
+        self.bits = s.bits;
+        self.bit_count = s.bit_count;
+        self.phase = s.phase;
+        self.dirty = s.dirty;
+        self.read_stream = s.read_stream;
+        self.read_left = s.read_left;
+        self.write_addr = s.write_addr;
+        self.write_buf = s.write_buf;
     }
 
     /// Serial read halfword (bit0 = next bit; idle returns 1).
@@ -429,6 +474,98 @@ impl EepromChip {
             }
         }
         self.dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unlock(flash: &mut FlashChip) {
+        flash.write(0x5555, 0xAA);
+        flash.write(0x2AAA, 0x55);
+    }
+
+    /// SDK FLASH1M sector erase: AA/55/80, AA/55, then 30 at the sector.
+    fn sector_erase(flash: &mut FlashChip, sector: u32) {
+        unlock(flash);
+        flash.write(0x5555, 0x80);
+        unlock(flash);
+        flash.write(sector, 0x30);
+    }
+
+    fn program(flash: &mut FlashChip, addr: u32, val: u8) {
+        unlock(flash);
+        flash.write(0x5555, 0xA0);
+        flash.write(addr, val);
+    }
+
+    #[test]
+    fn untagged_rom_is_not_sram() {
+        assert_eq!(detect(&[0u8; 256]), SaveType::None);
+        let mut sram = vec![0u8; 256];
+        sram[10..16].copy_from_slice(b"SRAM_V");
+        assert!(matches!(detect(&sram), SaveType::Sram(_)));
+    }
+
+    #[test]
+    fn flash128_id_is_sanyo() {
+        let mut flash = FlashChip::new(128 * 1024);
+        unlock(&mut flash);
+        flash.write(0x5555, 0x90);
+        assert_eq!(flash.read(0), 0x62);
+        assert_eq!(flash.read(1), 0x13);
+        flash.write(0, 0xF0);
+        assert_eq!(flash.read(0), 0xFF);
+    }
+
+    #[test]
+    fn amd_sector_erase_after_second_unlock() {
+        let mut flash = FlashChip::new(128 * 1024);
+        flash.data[0x1000] = 0x12;
+        flash.data[0x1FFF] = 0x34;
+        flash.data[0x2000] = 0x56;
+        sector_erase(&mut flash, 0x1000);
+        assert_eq!(flash.read(0x1000), 0xFF, "sector start erased");
+        assert_eq!(flash.read(0x1FFF), 0xFF, "sector end erased");
+        assert_eq!(flash.data[0x2000], 0x56, "next sector untouched");
+    }
+
+    #[test]
+    fn amd_chip_erase() {
+        let mut flash = FlashChip::new(64 * 1024);
+        flash.data[0] = 0x11;
+        flash.data[0x8000] = 0x22;
+        unlock(&mut flash);
+        flash.write(0x5555, 0x80);
+        unlock(&mut flash);
+        flash.write(0x5555, 0x10);
+        assert!(flash.data.iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    fn program_after_erase_and_no_raw_write() {
+        let mut flash = FlashChip::new(128 * 1024);
+        sector_erase(&mut flash, 0);
+        program(&mut flash, 0x20, 0xA5);
+        assert_eq!(flash.read(0x20), 0xA5);
+        // Command bytes must not poke SRAM-style into the array.
+        flash.write(0x20, 0x00);
+        assert_eq!(flash.read(0x20), 0xA5);
+    }
+
+    #[test]
+    fn bank_switch_selects_second_64k() {
+        let mut flash = FlashChip::new(128 * 1024);
+        flash.data[64 * 1024] = 0x77;
+        unlock(&mut flash);
+        flash.write(0x5555, 0xB0);
+        flash.write(0, 1);
+        assert_eq!(flash.read(0), 0x77);
+        unlock(&mut flash);
+        flash.write(0x5555, 0xB0);
+        flash.write(0, 0);
+        assert_eq!(flash.read(0), 0xFF);
     }
 }
 

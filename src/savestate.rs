@@ -1,7 +1,8 @@
 //! Savestates (.flst) — machine snapshot.
 //!
-//! `FAELST04` adds FIQ/UND/ABT banks (R8–R14 + SPSR).
-//! `FAELST03` still loads (those banks stay at defaults).
+//! `FAELST05` adds Flash/EEPROM FSMs + RTC GPIO (mid-erase F7 stays valid).
+//! `FAELST04` still loads (those machines reset to idle/ready).
+//! `FAELST03` still loads (FIQ/UND/ABT banks stay at defaults).
 //! `FAELST02` still loads (frac/DMA/FIFOs also stay at current values).
 
 use crate::emu::Emu;
@@ -13,13 +14,14 @@ use std::path::Path;
 const MAGIC_V2: &[u8; 8] = b"FAELST02";
 const MAGIC_V3: &[u8; 8] = b"FAELST03";
 const MAGIC_V4: &[u8; 8] = b"FAELST04";
+const MAGIC_V5: &[u8; 8] = b"FAELST05";
 
 pub fn save(emu: &Emu, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
     let mut f = File::create(path).with_context(|| format!("create {}", path.display()))?;
-    f.write_all(MAGIC_V4)?;
+    f.write_all(MAGIC_V5)?;
     // CPU
     for r in &emu.cpu.r {
         f.write_all(&r.to_le_bytes())?;
@@ -97,6 +99,14 @@ pub fn save(emu: &Emu, path: &Path) -> Result<()> {
     f.write_all(&snap.cps_b.to_le_bytes())?;
     f.write_all(&snap.cps_out.to_le_bytes())?;
     write_banks_v4(&mut f, &emu.cpu)?;
+    write_cart_fsm(&mut f, emu)?;
+    // Sidecar screenshot for humans / debug. Failure must not fail the slot.
+    let shot = crate::video::shot_path_for_state(path);
+    if crate::video::write_ppm(&shot, &emu.ppu.frame).is_ok() {
+        let latest = std::env::temp_dir().join("fairy-lantern-state.ppm");
+        let _ = std::fs::copy(&shot, latest);
+    }
+    let _ = crate::statedbg::write_report(emu, path);
     Ok(())
 }
 
@@ -116,6 +126,109 @@ fn write_banks_v4(f: &mut File, cpu: &crate::cpu::Cpu) -> Result<()> {
     f.write_all(&cpu.r13_und.to_le_bytes())?;
     f.write_all(&cpu.r14_und.to_le_bytes())?;
     f.write_all(&cpu.spsr_und.to_u32().to_le_bytes())?;
+    Ok(())
+}
+
+fn write_cart_fsm(f: &mut File, emu: &Emu) -> Result<()> {
+    if let Some(ref flash) = emu.bus.flash {
+        let (mode, step, _bank, _, _) = flash.debug_fsm();
+        f.write_all(&[1u8, mode, step])?;
+    } else {
+        f.write_all(&[0u8])?;
+    }
+    if let Ok(g) = emu.bus.eeprom.try_borrow() {
+        if let Some(ref e) = *g {
+            let s = e.snapshot_fsm();
+            f.write_all(&[1u8])?;
+            f.write_all(&[s.addr_bits, s.bit_count, s.phase, s.dirty as u8, s.read_left])?;
+            f.write_all(&s.bits.to_le_bytes())?;
+            f.write_all(&s.read_stream.to_le_bytes())?;
+            f.write_all(&s.write_addr.to_le_bytes())?;
+            f.write_all(&s.write_buf.to_le_bytes())?;
+        } else {
+            f.write_all(&[0u8])?;
+        }
+    } else {
+        f.write_all(&[0u8])?;
+    }
+    if emu.bus.rtc.present {
+        let s = emu.bus.rtc.snapshot_gpio();
+        f.write_all(&[1u8])?;
+        f.write_all(&s.data.to_le_bytes())?;
+        f.write_all(&s.dir.to_le_bytes())?;
+        f.write_all(&s.ctrl.to_le_bytes())?;
+        f.write_all(&[s.bit_count, s.cmd])?;
+        f.write_all(&s.buf)?;
+        f.write_all(&[s.buf_len, s.buf_idx, s.reading as u8, s.cs as u8, s.sck as u8, s.cmd_done as u8])?;
+    } else {
+        f.write_all(&[0u8])?;
+    }
+    Ok(())
+}
+
+fn read_cart_fsm(f: &mut File, emu: &mut Emu) -> Result<()> {
+    let mut has = [0u8; 1];
+    f.read_exact(&mut has)?;
+    if has[0] != 0 {
+        let mut b = [0u8; 2];
+        f.read_exact(&mut b)?;
+        if let Some(ref mut flash) = emu.bus.flash {
+            let bank = flash.bank;
+            flash.restore_fsm(b[0], b[1], bank);
+        }
+    }
+    f.read_exact(&mut has)?;
+    if has[0] != 0 {
+        let mut head = [0u8; 5];
+        f.read_exact(&mut head)?;
+        let bits = read_u64(f)?;
+        let mut rs = [0u8; 16];
+        f.read_exact(&mut rs)?;
+        let read_stream = u128::from_le_bytes(rs);
+        let write_addr = read_u16(f)?;
+        let write_buf = read_u64(f)?;
+        if let Ok(mut g) = emu.bus.eeprom.try_borrow_mut() {
+            if let Some(ref mut e) = *g {
+                e.restore_fsm(crate::battery::EepromFsm {
+                    addr_bits: head[0],
+                    bit_count: head[1],
+                    phase: head[2],
+                    dirty: head[3] != 0,
+                    read_left: head[4],
+                    bits,
+                    read_stream,
+                    write_addr,
+                    write_buf,
+                });
+            }
+        }
+    }
+    f.read_exact(&mut has)?;
+    if has[0] != 0 {
+        let data = read_u16(f)?;
+        let dir = read_u16(f)?;
+        let ctrl = read_u16(f)?;
+        let mut small = [0u8; 2];
+        f.read_exact(&mut small)?;
+        let mut buf = [0u8; 8];
+        f.read_exact(&mut buf)?;
+        let mut tail = [0u8; 6];
+        f.read_exact(&mut tail)?;
+        emu.bus.rtc.restore_gpio(crate::rtc::RtcGpio {
+            data,
+            dir,
+            ctrl,
+            bit_count: small[0],
+            cmd: small[1],
+            buf,
+            buf_len: tail[0],
+            buf_idx: tail[1],
+            reading: tail[2] != 0,
+            cs: tail[3] != 0,
+            sck: tail[4] != 0,
+            cmd_done: tail[5] != 0,
+        });
+    }
     Ok(())
 }
 
@@ -142,10 +255,11 @@ pub fn load(emu: &mut Emu, path: &Path) -> Result<()> {
     let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut magic = [0u8; 8];
     f.read_exact(&mut magic)?;
-    let (v3, v4) = match &magic {
-        m if m == MAGIC_V4 => (true, true),
-        m if m == MAGIC_V3 => (true, false),
-        m if m == MAGIC_V2 => (false, false),
+    let (v3, v4, v5) = match &magic {
+        m if m == MAGIC_V5 => (true, true, true),
+        m if m == MAGIC_V4 => (true, true, false),
+        m if m == MAGIC_V3 => (true, false, false),
+        m if m == MAGIC_V2 => (false, false, false),
         _ => bail!("not a Fairy Lantern savestate"),
     };
     for r in &mut emu.cpu.r {
@@ -253,6 +367,9 @@ pub fn load(emu: &mut Emu, path: &Path) -> Result<()> {
         if v4 {
             read_banks_v4(&mut f, &mut emu.cpu)?;
         }
+        if v5 {
+            read_cart_fsm(&mut f, emu)?;
+        }
     }
 
     emu.bus.save_dirty = true; // battery may have changed mid-state
@@ -323,8 +440,12 @@ mod tests {
     use crate::emu::Emu;
 
     fn dummy() -> Emu {
+        dummy_rom(vec![0u8; 0x200])
+    }
+
+    fn dummy_rom(data: Vec<u8>) -> Emu {
         let cart = Cart {
-            data: vec![0u8; 0x200],
+            data,
             title: "t".into(),
             game_code: "T".into(),
             maker: "00".into(),
@@ -337,7 +458,15 @@ mod tests {
     fn tmp(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("fairy-st-{name}.flst"));
         let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(p.with_extension("ppm"));
+        let _ = std::fs::remove_file(p.with_extension("dbg.txt"));
         p
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("ppm"));
+        let _ = std::fs::remove_file(path.with_extension("dbg.txt"));
     }
 
     #[test]
@@ -356,7 +485,7 @@ mod tests {
             0x80,
             "timer enable must come from snapshot IO, not the live machine"
         );
-        let _ = std::fs::remove_file(&path);
+        cleanup(&path);
     }
 
     #[test]
@@ -385,7 +514,7 @@ mod tests {
         assert_eq!(emu2.bus.dma.ch[1].count, 4);
         assert!(emu2.bus.dma.ch[1].active);
         assert_eq!(emu2.bus.sound.fifo_a_len(), 8);
-        let _ = std::fs::remove_file(&path);
+        cleanup(&path);
     }
 
     #[test]
@@ -402,6 +531,104 @@ mod tests {
         emu2.cpu.set_mode(0x11);
         assert_eq!(emu2.cpu.r[8], 0xFEED_FACE);
         assert_eq!(emu2.cpu.r[13], 0x0300_7F80);
-        let _ = std::fs::remove_file(&path);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn save_writes_sidecar_ppm() {
+        let emu = dummy();
+        let path = tmp("shot");
+        save(&emu, &path).unwrap();
+        let shot = path.with_extension("ppm");
+        let bytes = std::fs::read(&shot).expect("sidecar ppm");
+        assert!(
+            bytes.starts_with(b"P6\n240 160\n255\n"),
+            "GBA frame PPM header"
+        );
+        assert_eq!(bytes.len(), b"P6\n240 160\n255\n".len() + 240 * 160 * 3);
+        let dbg = std::fs::read_to_string(path.with_extension("dbg.txt")).expect("sidecar dbg");
+        assert!(dbg.contains("fairy-lantern debug report"), "dbg header");
+        assert!(dbg.contains("== host process =="), "resource section");
+        assert!(dbg.contains("maxrss_kib=") || dbg.contains("VmRSS:"), "rss");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v5_restores_flash_erase_prep() {
+        let mut rom = vec![0u8; 0x400];
+        rom[0x100..0x108].copy_from_slice(b"FLASH1M_");
+        let mut emu = dummy_rom(rom);
+        {
+            let flash = emu.bus.flash.as_mut().expect("flash128");
+            flash.data[0] = 0x12;
+            flash.data[0x0FFF] = 0x34;
+            flash.write(0x5555, 0xAA);
+            flash.write(0x2AAA, 0x55);
+            flash.write(0x5555, 0x80);
+            flash.write(0x5555, 0xAA);
+            flash.write(0x2AAA, 0x55);
+            let (mode, step, _, _, _) = flash.debug_fsm();
+            assert_eq!((mode, step), (2, 2), "erase-prep + second unlock");
+        }
+        let path = tmp("flashfsm");
+        save(&emu, &path).unwrap();
+        let mut emu2 = dummy_rom({
+            let mut r = vec![0u8; 0x400];
+            r[0x100..0x108].copy_from_slice(b"FLASH1M_");
+            r
+        });
+        load(&mut emu2, &path).unwrap();
+        let flash = emu2.bus.flash.as_mut().unwrap();
+        assert_eq!(flash.debug_fsm().0, 2);
+        flash.write(0, 0x30);
+        assert_eq!(flash.data[0], 0xFF, "confirm after F7 must still erase");
+        assert_eq!(flash.data[0x0FFF], 0xFF);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v5_restores_eeprom_phase() {
+        let mut rom = vec![0u8; 0x400];
+        rom[0x100..0x109].copy_from_slice(b"EEPROM_V1");
+        let mut emu = dummy_rom(rom.clone());
+        {
+            let mut g = emu.bus.eeprom.borrow_mut();
+            let e = g.as_mut().expect("eeprom");
+            e.write_bit(1);
+            e.write_bit(1);
+            e.write_bit(0);
+            let s = e.snapshot_fsm();
+            assert_eq!(s.phase, 1);
+            assert_eq!(s.bit_count, 3);
+        }
+        let path = tmp("eepfsm");
+        save(&emu, &path).unwrap();
+        let mut emu2 = dummy_rom(rom);
+        load(&mut emu2, &path).unwrap();
+        let g = emu2.bus.eeprom.borrow();
+        let s = g.as_ref().unwrap().snapshot_fsm();
+        assert_eq!(s.phase, 1);
+        assert_eq!(s.bit_count, 3);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v5_restores_rtc_gpio() {
+        let mut rom = vec![0u8; 0x400];
+        rom[0x100..0x106].copy_from_slice(b"RTC_V_");
+        let mut emu = dummy_rom(rom.clone());
+        assert!(emu.bus.rtc.present);
+        emu.bus.rtc.write16(crate::rtc::GPIO_DIR, 0x0007);
+        emu.bus.rtc.write16(crate::rtc::GPIO_CTRL, 0x0001);
+        emu.bus.rtc.write16(crate::rtc::GPIO_DATA, 0x0004);
+        let path = tmp("rtcio");
+        save(&emu, &path).unwrap();
+        let mut emu2 = dummy_rom(rom);
+        load(&mut emu2, &path).unwrap();
+        let s = emu2.bus.rtc.snapshot_gpio();
+        assert_eq!(s.dir, 0x0007);
+        assert_eq!(s.ctrl, 0x0001);
+        assert_eq!(s.data & 0x4, 0x4);
+        cleanup(&path);
     }
 }

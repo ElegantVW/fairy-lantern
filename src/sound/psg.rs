@@ -63,7 +63,10 @@ struct WaveCh {
     volume_code: u8,
     length: u16,
     length_en: bool,
-    wave: [u8; 16],
+    /// Two 32-sample (16-byte) banks. SOUND3CNT_L bit 6 selects the CPU window.
+    banks: [[u8; 16]; 2],
+    cpu_bank: u8,
+    play_64: bool,
 }
 
 impl Default for WaveCh {
@@ -75,7 +78,9 @@ impl Default for WaveCh {
             volume_code: 0,
             length: 0,
             length_en: false,
-            wave: [0; 16],
+            banks: [[0; 16]; 2],
+            cpu_bank: 0,
+            play_64: false,
         }
     }
 }
@@ -132,27 +137,52 @@ impl Psg {
             2 => trigger_square(&mut self.sq2, 0, regs.ch2_l, regs.ch2_h, false, rate),
             3 => {
                 let w = &mut self.wave;
-                w.wave = regs.wave;
+                sync_wave_ctrl(w, regs.ch3_l);
                 w.enabled = regs.ch3_l & 0x80 != 0;
                 w.volume_code = ((regs.ch3_h >> 5) & 3) as u8;
                 w.length = 256u16.saturating_sub(regs.ch3_h & 0xFF);
                 w.length_en = regs.ch3_x & (1 << 14) != 0;
                 w.phase = 0;
-                w.phase_inc = freq_to_inc(wave_hz(regs.ch3_x), rate);
+                w.phase_inc = wave_freq_to_inc(wave_hz(regs.ch3_x), rate);
             }
             4 => trigger_noise(&mut self.noise, regs.ch4_l, regs.ch4_h, rate),
             _ => {}
         }
     }
 
+    pub fn sync_wave_ctrl(&mut self, ch3_l: u16) {
+        sync_wave_ctrl(&mut self.wave, ch3_l);
+    }
+
     pub fn set_wave_byte(&mut self, offset: u8, val: u8) {
-        self.wave.wave[(offset as usize) & 15] = val;
+        let b = self.wave.cpu_bank as usize & 1;
+        self.wave.banks[b][(offset as usize) & 15] = val;
+    }
+
+    pub fn get_wave_byte(&self, offset: u8) -> u8 {
+        let b = self.wave.cpu_bank as usize & 1;
+        self.wave.banks[b][(offset as usize) & 15]
+    }
+
+    pub fn all_off(&mut self) {
+        self.sq1.enabled = false;
+        self.sq2.enabled = false;
+        self.wave.enabled = false;
+        self.noise.enabled = false;
+    }
+
+    /// SOUNDCNT_X bits 0–3: PSG 1–4 currently producing.
+    pub fn channel_status(&self) -> u8 {
+        (self.sq1.enabled as u8)
+            | ((self.sq2.enabled as u8) << 1)
+            | ((self.wave.enabled as u8) << 2)
+            | ((self.noise.enabled as u8) << 3)
     }
 
     /// Produce one mono PSG sample at `rate` Hz. Returns scaled i16 contribution.
     pub fn sample(&mut self, regs: &PsgRegs, rate: u32) -> i16 {
         let rate = rate.max(8000);
-        self.wave.wave = regs.wave;
+        sync_wave_ctrl(&mut self.wave, regs.ch3_l);
         if regs.ch3_l & 0x80 == 0 {
             self.wave.enabled = false;
         }
@@ -177,7 +207,7 @@ impl Psg {
         refresh_square_freq(&mut self.sq1, regs.ch1_x, rate);
         refresh_square_freq(&mut self.sq2, regs.ch2_h, rate);
         {
-            self.wave.phase_inc = freq_to_inc(wave_hz(regs.ch3_x), rate);
+            self.wave.phase_inc = wave_freq_to_inc(wave_hz(regs.ch3_x), rate);
             self.wave.volume_code = ((regs.ch3_h >> 5) & 3) as u8;
             self.wave.length_en = regs.ch3_x & (1 << 14) != 0;
         }
@@ -228,6 +258,19 @@ fn freq_to_inc(freq_hz: u32, stream_rate: u32) -> u32 {
         return 0;
     }
     ((freq_hz as u64 * 8 * 65536) / stream_rate as u64).min(u32::MAX as u64) as u32
+}
+
+/// One CH3 nibble per `wave_hz` ticks (not ×8 — that is the square duty table).
+fn wave_freq_to_inc(freq_hz: u32, stream_rate: u32) -> u32 {
+    if freq_hz == 0 || stream_rate == 0 {
+        return 0;
+    }
+    ((freq_hz as u64 * 65536) / stream_rate as u64).min(u32::MAX as u64) as u32
+}
+
+fn sync_wave_ctrl(ch: &mut WaveCh, ch3_l: u16) {
+    ch.cpu_bank = ((ch3_l >> 6) & 1) as u8;
+    ch.play_64 = ch3_l & (1 << 5) != 0;
 }
 
 /// GBATEK CH3: rate = 2097152 / (2048 − n) Hz (32-sample wave).
@@ -429,9 +472,14 @@ fn wave_tick(ch: &mut WaveCh) -> i16 {
         return 0;
     }
     ch.phase = ch.phase.wrapping_add(ch.phase_inc);
-    let idx = ((ch.phase >> 16) & 31) as usize;
-    let byte = ch.wave[idx / 2];
-    let nibble = if idx & 1 == 0 { byte >> 4 } else { byte & 0xF };
+    let (bank, ni) = if ch.play_64 {
+        let idx = ((ch.phase >> 16) & 63) as usize;
+        (idx / 32, idx % 32)
+    } else {
+        (((ch.cpu_bank as usize) & 1), ((ch.phase >> 16) & 31) as usize)
+    };
+    let byte = ch.banks[bank][ni / 2];
+    let nibble = if ni & 1 == 0 { byte >> 4 } else { byte & 0xF };
     let shift = match ch.volume_code {
         1 => 0,
         2 => 1,
@@ -484,5 +532,64 @@ mod tests {
     fn wave_hz_matches_gbatek() {
         assert_eq!(wave_hz(0), 2_097_152 / 2048);
         assert_eq!(wave_hz(1024), 2_097_152 / 1024);
+    }
+
+    #[test]
+    fn soundcnt_x_bits_follow_channel_enable() {
+        let mut p = Psg::default();
+        let mut regs = PsgRegs::default();
+        regs.sndx = 0x80;
+        regs.ch2_l = 0xF000;
+        regs.ch2_h = 0x8000 | 1024;
+        p.trigger(2, &regs, 32768);
+        assert_eq!(p.channel_status() & 2, 2);
+        p.all_off();
+        assert_eq!(p.channel_status(), 0);
+    }
+
+    #[test]
+    fn wave_bank1_write_does_not_change_bank0_playback() {
+        let mut p = Psg::default();
+        let mut regs = PsgRegs::default();
+        regs.sndx = 0x80;
+        regs.sndl = 0xFF77;
+        regs.ch3_l = 0x80; // 32-sample, bank 0
+        regs.ch3_h = 1 << 5; // 100% volume
+        regs.ch3_x = 0x8000;
+        p.sync_wave_ctrl(0x80);
+        p.set_wave_byte(0, 0xF0);
+        p.sync_wave_ctrl(0x80 | (1 << 6)); // map bank 1
+        p.set_wave_byte(0, 0x10);
+        p.sync_wave_ctrl(0x80); // play bank 0
+        p.trigger(3, &regs, 32768);
+        let s = p.sample(&regs, 32768);
+        assert_ne!(s, 0, "bank 0 nibble 0xF should be audible");
+    }
+
+    #[test]
+    fn wave_64_uses_both_banks() {
+        let mut p = Psg::default();
+        let mut regs = PsgRegs::default();
+        regs.sndx = 0x80;
+        regs.sndl = 0xFF77;
+        regs.ch3_l = 0x80 | (1 << 5); // 64-sample
+        regs.ch3_h = 1 << 5;
+        regs.ch3_x = 0x8000;
+        p.sync_wave_ctrl(regs.ch3_l);
+        p.set_wave_byte(0, 0xF0); // bank 0 (cpu_bank still 0)
+        p.sync_wave_ctrl(regs.ch3_l | (1 << 6));
+        p.set_wave_byte(0, 0x10); // bank 1
+        p.sync_wave_ctrl(regs.ch3_l);
+        p.trigger(3, &regs, 32768);
+        // Force phase into the second bank (sample 32).
+        p.wave.phase = 32 << 16;
+        let s = wave_tick(&mut p.wave);
+        assert_ne!(s, 0);
+        // nibble 0x1 is quieter / different sign than 0xF
+        p.wave.phase = 0;
+        let s0 = wave_tick(&mut p.wave);
+        p.wave.phase = 32 << 16;
+        let s32 = wave_tick(&mut p.wave);
+        assert_ne!(s0, s32, "bank 0 and bank 1 must not play the same nibble");
     }
 }

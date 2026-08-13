@@ -7,6 +7,23 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// GPIO registers (relative to 0x0800_0000 cart space — full addr 0x080000C4).
+/// GPIO + serial engine for savestates (host clock is not stored).
+#[derive(Clone, Copy, Debug)]
+pub struct RtcGpio {
+    pub data: u16,
+    pub dir: u16,
+    pub ctrl: u16,
+    pub bit_count: u8,
+    pub cmd: u8,
+    pub buf: [u8; 8],
+    pub buf_len: u8,
+    pub buf_idx: u8,
+    pub reading: bool,
+    pub cs: bool,
+    pub sck: bool,
+    pub cmd_done: bool,
+}
+
 pub const GPIO_DATA: u32 = 0x0800_00C4;
 pub const GPIO_DIR: u32 = 0x0800_00C6;
 pub const GPIO_CTRL: u32 = 0x0800_00C8;
@@ -57,6 +74,41 @@ impl Rtc {
             sck: false,
             cmd_done: false,
         }
+    }
+
+    pub fn snapshot_gpio(&self) -> RtcGpio {
+        RtcGpio {
+            data: self.data,
+            dir: self.dir,
+            ctrl: self.ctrl,
+            bit_count: self.bit_count,
+            cmd: self.cmd,
+            buf: self.buf,
+            buf_len: self.buf_len,
+            buf_idx: self.buf_idx,
+            reading: self.reading,
+            cs: self.cs,
+            sck: self.sck,
+            cmd_done: self.cmd_done,
+        }
+    }
+
+    pub fn restore_gpio(&mut self, s: RtcGpio) {
+        if !self.present {
+            return;
+        }
+        self.data = s.data;
+        self.dir = s.dir;
+        self.ctrl = s.ctrl;
+        self.bit_count = s.bit_count;
+        self.cmd = s.cmd;
+        self.buf = s.buf;
+        self.buf_len = s.buf_len;
+        self.buf_idx = s.buf_idx;
+        self.reading = s.reading;
+        self.cs = s.cs;
+        self.sck = s.sck;
+        self.cmd_done = s.cmd_done;
     }
 
     pub fn detect(rom: &[u8]) -> bool {

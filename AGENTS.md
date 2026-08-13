@@ -3,20 +3,20 @@
 GBA emulator in Rust. Canonical tree is this independent repo (`ElegantVW/fairy-lantern`).
 The copy at `faeos/fairy-lantern` is stale and should not be edited.
 
-## Status (2026-08-13, `sacred/sound-working`)
+## Status (2026-08-13)
 
-v0.10.0, commit `7816e1b`. Tag `sacred/sound-working` and branch `checkpoint/sound-working`
-are the restore point where Pokémon Liquid Crystal **intro music is listenable**.
+v0.10.0. Restore point for **listenable intro music**: tag `sacred/sound-working`
+/ branch `checkpoint/sound-working` (`7816e1b`). The working tree is **ahead** of
+that tag: fight HP bars, Flash 128K erase, `FAELST05`, F5 shot+`.dbg.txt`,
+pacing recovery, SWI→SVC, timer overflow counts, CI.
 
-LC (BPRE) boots to the overworld: title art, dialogue, walking camera, DirectSound
-FIFO A+B → host. Headless 450-frame run: `unk_ops=0`, `swi_unk=0`, IWRAM mixer
-alive, A/B mix buffers stay in a healthy 8-bit range (no rail).
+LC (BPRE) boots to the overworld, plays intro/title through DirectSound A+B,
+can finish an in-game FLASH save, and can fight (HUD, EXP). Affine identity/PD
+hacks stay **on** by default until the LC campaign is walked further.
 
 This is **not** mGBA-class. Remaining holes: [docs/AUDIT.md](docs/AUDIT.md).
-Sound path detail: [docs/SOUND_AUDIT.md](docs/SOUND_AUDIT.md).
-The old boot-hang write-up is history: [docs/SOUND_INVESTIGATION.md](docs/SOUND_INVESTIGATION.md).
-
-To restore this sound state later:
+Sound path: [docs/SOUND_AUDIT.md](docs/SOUND_AUDIT.md).
+Old boot-hang write-up: [docs/SOUND_INVESTIGATION.md](docs/SOUND_INVESTIGATION.md).
 
 ```
 git checkout sacred/sound-working
@@ -72,12 +72,50 @@ data-processing immediate decoder, so reverb wrote `r5+6` instead of
 
 ## Savestates
 
-`.flst` magic `FAELST04`: CPU (including FIQ/UND/ABT banks), IO, timers (frac),
-halt, DMA internals, sound FIFOs. `FAELST03` / `FAELST02` still load. F5 / F7
-in the play window.
+`.flst` magic `FAELST05`: CPU (FIQ/UND/ABT), IO, timers (frac), halt, DMA,
+FIFOs, Flash/EEPROM FSM, RTC GPIO. `FAELST04`–`02` still load (those machines
+start idle). F5 also writes `stem.ppm` and `stem.dbg.txt` (host RSS/CPU,
+OAM, pals, sound). Copies: `/tmp/fairy-lantern-state.ppm` and `.dbg.txt`.
 
 Affine identity/PD caps stay on for Liquid Crystal unless
 `FAIRY_ACCURATE_AFFINE=1`. Try that flag if a **battle** HUD/camera looks wrong.
+
+## Input (now / later)
+
+**Now:** keyboard only. `play::poll_keys` ORs minifb keys into the 10-bit
+GBA `KEYINPUT` mask (0 = pressed):
+
+| GBA | Keys |
+|-----|------|
+| A | Z, Space, J |
+| B | X, K |
+| L / R | Q / E |
+| Start / Select | Enter / RightShift or Backspace |
+| D-pad | arrows or WASD |
+| Pause / state | P / F5 / F7 / F8 / Esc |
+
+minifb 0.27 has **no** gamepad API. Controllers do nothing today.
+
+**Later (do not start until the LC campaign gate is boring):** map a host
+gamepad onto the **same** `KEYINPUT` bits. That is a commercial advantage
+(couch play) but it is not a current objective.
+
+When we do it:
+
+- Keep keyboard working; OR pads into the same mask (do not replace keys).
+- Prefer `gilrs` (cross-platform) or Linux `evdev`; do not block the 59.73 Hz
+  loop on device enumerate.
+- Standard layout: face A/B, Start/Select, shoulders L/R, d-pad. Left stick
+  → d-pad with a deadzone (~0.4). Ignore gyro/touch/rumble for v1.
+- Hotplug: if the pad vanishes, fall back to keyboard without a hang.
+- Do not send analog into KEYINPUT; the GBA keypad is digital.
+- Test: LC overworld walk + fight menu with pad only, then keyboard only.
+
+## Headless
+
+`fairy run --frames N --load-state --save-state ROM` loads the default `.flst`,
+runs N frames, writes state + shot + `.dbg.txt`. Always dumps
+`/tmp/fairy-lantern-audio.wav` and `/tmp/fairy-lantern-last.ppm`.
 
 ## ROM loader
 

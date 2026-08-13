@@ -1,7 +1,7 @@
 # Fairy Lantern audit
 
 **Original date:** 2026-08-13  
-**Current as of:** 2026-08-13, `7816e1b` / tag `sacred/sound-working`  
+**Current as of:** 2026-08-13 (tree ahead of `7816e1b` / `sacred/sound-working`)  
 **Tree:** independent repo (`ElegantVW/fairy-lantern`)  
 **Scope:** static review of `src/`, docs, git/hygiene, tests, and Pokémon Liquid Crystal. Sound follow-up: [SOUND_AUDIT.md](SOUND_AUDIT.md).
 
@@ -14,9 +14,9 @@ plays the intro/title song through real DirectSound FIFOs. CPU, IRQ, timers,
 FIFO DMA, and the ARM `STRB [Rn, Rm]` addressing-mode-2 bug were the load-bearing
 fixes.
 
-It is **not** a complete GBA: unknown opcodes NOP, SWI does not enter SVC, BIOS
-reads are not open-bus, DMA3 video capture is missing, PSG is unproven, save
-detect defaults to SRAM, and there are no PPU goldens or CI.
+It is **not** a complete GBA: unknown opcodes still NOP (first 8 now log),
+DMA3 video capture is missing, PSG is unproven, and there are no PPU goldens
+or CI. SWI now enters SVC for HLE; untagged carts no longer invent SRAM.
 
 Use it for titles that have been walked through. Do not read “v0.10” as
 mGBA-class.
@@ -47,46 +47,52 @@ ROM: user-supplied BPRE, not in repo.
 | PSG | 0 | 0 |
 | intro | song buried under star wash | listenable; star is a one-shot |
 
-Affine identity/PD hacks remain **on** by default. Battles are the next checkpoint.
+Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`).
 
 ## Finding status
 
 | # | Topic | Status |
 |---|---|---|
 | 1 | Savestate timer-ctrl from old IO | **Fixed** (`FAELST03`+) |
-| 2 | Savestate not a full machine | **Partial** — DMA, FIFOs, halt, frac saved; EEPROM FSM / RTC GPIO / flash `cmd_step` still omitted |
+| 2 | Savestate not a full machine | **Partial** — `FAELST05` adds Flash/EEPROM FSM + RTC GPIO; host audio ring still omitted |
 | 3 | ARM `MSR #imm` never decodes | **Fixed** (mask `0x0FB0_F000` + test) |
 | 4 | Zip / ROM no size cap | **Fixed** (32 MiB + zip size match) |
-| 5 | Unknown opcodes silent NOP | **Open** — counter in title bar / headless; no trap |
-| 6 | BIOS always readable | **Open** — comment claims open-bus; reads still serve `bios[]` |
+| 5 | Unknown opcodes silent NOP | **Partial** — still NOP; first 8 log `pc`+opcode |
+| 6 | BIOS always readable | **Fixed** — open-bus unless `exec_pc` is in BIOS |
 | 7 | Duplicate SOUNDCNT `write16` arms | **Fixed** (clippy clean on that path) |
 | 8 | Only USR/IRQ/SVC banked | **Fixed** (FIQ/UND/ABT) |
 | 9 | `LDM/STM ^` user-bank ignored | **Fixed** |
-| 10 | SWI never enters SVC | **Open** |
-| 11 | SoftReset / Sqrt / RegisterRamReset | **Partial** — SoftReset honors `03007FFA`; IWRAM wipe keeps last 0x200; **Sqrt still `f64`** |
+| 10 | SWI never enters SVC | **Fixed** — enter SVC + I + ARM, HLE, restore SPSR (SoftReset may stay out) |
+| 11 | SoftReset / Sqrt / RegisterRamReset | **Partial** — SoftReset honors `03007FFA`; IWRAM wipe keeps last 0x200; **Sqrt is integer** |
 | 12 | HBlank at end of 1232-cycle line | **Fixed** (`HBLANK_CYCLE = 1006`) |
 | 13 | Affine identity / PD caps | **Gated** — still default-on; `FAIRY_ACCURATE_AFFINE=1` disables |
 | 14 | DMA3 video capture | **Open** |
-| 15 | Timer overflow storms capped at 16 | **Open** |
+| 15 | Timer overflow storms capped at 16 | **Fixed** — all overflows counted; cascade closed-form; IF raised once |
 | 16 | m4a BIOS HLE guess / fake PCM | **Stubbed** — no IWRAM writes; LC uses ROM mixer |
 | 17 | Waitstates averaged | **Partial** — sequential vs N fetch + LDR/STR data waits; no real prefetch buffer |
-| 18 | VRAM `% 96K` | **Open** |
-| 19 | Unknown save → 64K SRAM | **Open** |
-| 20 | Flash IDs / erase approximate | **Open** |
+| 18 | VRAM `% 96K` | **Fixed** — 128K window, upper 32K mirrors OBJ |
+| 19 | Unknown save → 64K SRAM | **Fixed** — untagged cart is `SaveType::None` (no SRAM poke) |
+| 20 | Flash IDs / erase approximate | **Partial** — AMD 80+AA/55+10/30 erase works; IDs still hardcoded Sanyo/SST |
 | 21 | `FAIRY_DMA_TRACE` env on hot path | **Fixed** (`fairy_trace()` OnceLock) |
-| 22 | LC PCs hardcoded in `cpu/mod.rs` | **Open** (gated, still in tree) |
+| 22 | LC PCs hardcoded in `cpu/mod.rs` | **Partial** — `cfg(debug)` + `FAIRY_DMA_TRACE`; gone from release step |
 | 23 | Docs contradict each other | **Fixed** (this refresh) |
-| 24 | Almost no regression tests | **Partial** — 41 unit tests; still no PPU goldens / PCM fixture |
-| 25 | No CI / toolchain pin | **Open** |
+| 24 | Almost no regression tests | **Partial** — 67+ unit tests; still no PPU goldens / PCM fixture |
+| 25 | No CI / toolchain pin | **Partial** — `rust-toolchain.toml` + `.github/workflows/test.yml` |
 | 26 | `faeos/fairy-lantern` will rot | **Open** — treat as dead; do not edit |
 | 27 | Host is `aplay`/`pw-cat` | **Partial** — `pw-cat` 48 kHz stereo, no reopen; still Linux-only |
 | 28 | Headless always writes `/tmp` WAV+PPM | **Open** (intentional for debug) |
 | 29 | TUI needs Spellbook on PATH | **Open** |
 | 30 | SPARK assembler `panic!` | **Open** |
 
-Plus (not in the original list): ARM addressing mode 2 register offset — **Fixed**
-(`addr_mode2_offset`; `strb_reg_offset_uses_rm_not_imm`). That was the
-listenable-audio bug. See [SOUND_AUDIT.md](SOUND_AUDIT.md).
+Plus (not in the original list):
+- ARM addressing mode 2 register offset — **Fixed** (`strb_reg_offset_uses_rm_not_imm`).
+- Same-priority OBJ order — **Fixed** (low OAM index in front; Gen3 HP bars).
+- Flash AMD erase 80+AA/55+10/30 — **Fixed**.
+- Host catch-up spiral (up to 6 frames, never recovered) — **Fixed** (1 extra if ring starving).
+- Gamepad / `KEYINPUT` from a host controller — **Deferred**. Keyboard only
+  (`play::poll_keys`). minifb has no pad API. When LC’s campaign gate is done,
+  map gilrs/evdev onto the same 10 bits; keep keys; no analog into KEYINPUT.
+  Notes: [AGENTS.md](../AGENTS.md) § Input.
 
 ### Fix waves (same day, historical)
 
@@ -304,15 +310,14 @@ Also unused: `Eeprom512`, `Timers::on_write_reload`, `Emu::from_path`, `Cpu::{re
 
 ## Recommended fix order (current)
 
-1–8 of the original list are done or no longer first. Next, in order:
+Done this week: sound checkpoint, HP bars, integer Sqrt, BIOS open-bus, unk_op log, VRAM mirrors.
 
-1. Walk LC **fights** (affine, blend, cries). Try `FAIRY_ACCURATE_AFFINE=1` if a HUD/camera is wrong.
-2. Integer `Sqrt` SWI; BIOS open-bus unless PC is in BIOS.
-3. Trap or log the first unknown opcode (PC + word) in the play window.
-4. Hardware VRAM mirrors; `SOUNDCNT_X` channel-on bits; wave 64-sample bank.
-5. PPU golden frames (title / overworld / one fight) + a tiny committed PCM fixture.
-6. Save-type detect without “default SRAM”; DMA3 special; timer overflow cap.
-7. CI + rust-toolchain. Do not sync `faeos/fairy-lantern` until this repo is the only build.
+Next:
+
+1. Play LC fights (mosaic drain, cries, fades, menu). `FAIRY_ACCURATE_AFFINE=1` if HUD/camera is wrong.
+2. PPU golden frames + a tiny committed PCM fixture.
+4. Save-type detect without “default SRAM”; DMA3 special; timer overflow cap.
+5. CI + rust-toolchain. Do not sync `faeos/fairy-lantern`.
 
 ---
 

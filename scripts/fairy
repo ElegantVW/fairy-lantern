@@ -31,9 +31,124 @@ else
   fi
 fi
 
+# Real cargo JSON → crate counts / names. Not a timed fake bar.
+cargo_progress() {
+  python3 -u <<'PY'
+import json, os, sys
+
+tty = os.isatty(2)
+width = 28
+compiled = 0
+cached = 0
+try:
+    expected = max(1, int(os.environ.get("FAIRY_CRATE_TOTAL", "0")))
+except ValueError:
+    expected = 1
+
+
+def crate_name(msg):
+    tgt = (msg.get("target") or {}).get("name")
+    if tgt:
+        return tgt
+    pid = msg.get("package_id") or ""
+    if "#" in pid:
+        return pid.rsplit("#", 1)[-1]
+    return pid.split(" ", 1)[0] or "crate"
+
+
+def bar(done, total):
+    total = max(total, 1)
+    fill = min(width, int(round(width * min(done, total) / total)))
+    if tty:
+        return "█" * fill + "░" * (width - fill)
+    return "#" * fill + "-" * (width - fill)
+
+
+def draw(suffix):
+    done = compiled + cached
+    total = max(expected, done)
+    line = (
+        f"  [{bar(done, total)}] {done}/{total}  "
+        f"{compiled} compiled · {cached} cached  {suffix}"
+    )
+    if tty:
+        sys.stderr.write("\r\033[K" + line[:140])
+    else:
+        sys.stderr.write(line + "\n")
+    sys.stderr.flush()
+
+
+ok = False
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        continue
+    reason = msg.get("reason")
+    if reason == "compiler-artifact":
+        name = crate_name(msg)
+        if msg.get("fresh"):
+            cached += 1
+        else:
+            compiled += 1
+        draw(name)
+    elif reason == "compiler-message":
+        rendered = (msg.get("message") or {}).get("rendered")
+        if rendered:
+            if tty:
+                sys.stderr.write("\n")
+            sys.stderr.write(rendered)
+            if not rendered.endswith("\n"):
+                sys.stderr.write("\n")
+            sys.stderr.flush()
+    elif reason == "build-finished":
+        ok = bool(msg.get("success"))
+        # Do not exit: cargo still flushes JSON and SIGPIPEs if we close.
+
+if tty:
+    sys.stderr.write("\n")
+draw("ok" if ok else "FAILED")
+if tty:
+    sys.stderr.write("\n")
+sys.exit(0 if ok else 1)
+PY
+}
+
 if [[ "$need" -eq 1 ]]; then
-  echo "fairy: source newer than binary — cargo build --release" >&2
-  (cd "$ROOT" && cargo build --release --quiet)
+  echo "✦ fairy: compiling release (source newer than binary)…" >&2
+  echo "  cargo is working — counts are crates from this build, not a timer." >&2
+  crate_total="$(
+    cd "$ROOT" && cargo metadata --format-version 1 --offline 2>/dev/null \
+      | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("packages") or []))' \
+      2>/dev/null || echo 0
+  )"
+  export FAIRY_CRATE_TOTAL="$crate_total"
+  # nounset + reading PIPESTATUS[1] after a one-element assignment is the crash
+  # the user hit. Copy the whole array in one command; restore flags after.
+  set +e
+  set +o pipefail
+  set +u
+  (cd "$ROOT" && CARGO_TERM_PROGRESS_WHEN=never cargo build --release --quiet --message-format=json --color=always) \
+    | cargo_progress
+  ps=("${PIPESTATUS[@]}")
+  st="${ps[0]:-1}"
+  py="${ps[1]:-1}"
+  set -euo pipefail
+  # cargo 141 = SIGPIPE if the reader closed early — trust the parser instead
+  if [[ "$st" -eq 141 ]]; then
+    st="$py"
+  fi
+  if [[ "$st" -ne 0 || "$py" -ne 0 ]]; then
+    echo "✦ fairy: compile failed — rustc output follows" >&2
+    if ! (cd "$ROOT" && cargo build --release); then
+      echo "fairy: build failed ($BIN missing)" >&2
+      exit 1
+    fi
+  fi
+  echo "✦ fairy: build ok — starting" >&2
 fi
 
 if [[ ! -x "$BIN" ]]; then

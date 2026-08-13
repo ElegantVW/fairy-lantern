@@ -90,6 +90,22 @@ impl Sound {
         self.mix.psg.set_wave_byte(offset, val);
     }
 
+    pub fn psg_get_wave_byte(&self, offset: u8) -> u8 {
+        self.mix.psg.get_wave_byte(offset)
+    }
+
+    pub fn psg_sync_wave(&mut self, ch3_l: u16) {
+        self.mix.psg.sync_wave_ctrl(ch3_l);
+    }
+
+    pub fn psg_all_off(&mut self) {
+        self.mix.psg.all_off();
+    }
+
+    pub fn psg_channel_status(&self) -> u8 {
+        self.mix.psg.channel_status()
+    }
+
     pub fn backend_name(&self) -> &'static str {
         self.backend
     }

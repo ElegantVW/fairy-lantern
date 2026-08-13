@@ -21,7 +21,7 @@ This is a working **ROM-mixer DirectSound player**, not a complete GBA APU:
 
 - PSG exists (32768 Hz accum, CH3 formula) but LC intro never used it (`from_psg=0`).
 - BIOS m4a SWIs are stubs (no fake IWRAM). LC does not call them.
-- Wave 64-sample bank and `SOUNDCNT_X` bits 0–3 are still missing.
+- Wave 64-sample bank and `SOUNDCNT_X` bits 0–3 are implemented.
 
 ---
 
@@ -68,7 +68,9 @@ Liquid Crystal never enters them.
 | Underrun | `hold_valid=false` → 0; host also inserts silence |
 | BPRE timer math | `(0x10000-reload)*prescale = 1254` → ~13379 Hz |
 | SOUNDCNT_H | dest enable, 50/100%, timer select, write-1 reset 11/15 |
-| SOUNDCNT_X bit 7 | master mute |
+| SOUNDCNT_X bit 7 | master mute; write-0 stops all PSG |
+| SOUNDCNT_X bits 0–3 | live PSG-on flags (read-only) |
+| Wave banks | SOUND3CNT_L bit5=64-sample, bit6=CPU bank |
 | SOUNDBIAS | `bias_out`: add 0x200, clip 10-bit, scale to i16 |
 | Addressing mode 2 | `STRB [r5, r6]` writes `r5+r6` (reverb left buffer) |
 | Host | device opened once; 48 kHz stereo; no rate-change reopen |
@@ -115,8 +117,8 @@ Do not use pre-checkpoint `/tmp/fairy-lantern-audio.wav` files as goldens.
 | 11 | Host reopens on rate change | **Fixed** — open once at 48 kHz |
 | 12 | Ring drops oldest | **Changed** — drop newest if full; underrun = silence |
 | 13 | Cubic resampler unused | **Open** (linear 32768→48k is what the host uses) |
-| 14 | Wave bank / 64-sample mode | **Open** |
-| 15 | `SOUNDCNT_X` bits 0–3 | **Open** |
+| 14 | Wave bank / 64-sample mode | **Fixed** |
+| 15 | `SOUNDCNT_X` bits 0–3 | **Fixed** |
 | 16 | FIFO clock ignores cascade | **Open** |
 | 17 | Headless always dumps `/tmp` WAV | **Open** (debug default) |
 | 18 | No golden PCM / dual-rate test | **Partial** — mixer unit tests exist; no committed WAV golden |
@@ -252,7 +254,7 @@ Host is `-c 1`. `SOUNDCNT_H` dest bits are enables, not pan. `SOUNDCNT_L` L/R is
 1–5 and the STRB/reverb fix are done. Next:
 
 1. Play LC **fights** (cries, layered SFX). If it rails again, dump `FAIRY_MIX_STAT=1` before changing the mixer.
-2. `SOUNDCNT_X` channel-on bits; wave 64-sample bank.
+2. PPU goldens / PCM fixture if a fight or cry sounds wrong.
 3. A tiny committed PCM fixture (not a commercial ROM). Dual-timer A/B at different rates if a title needs it.
 4. Leave BIOS m4a as stubs unless a game actually calls SWI `0x1A`–`0x2B`.
 

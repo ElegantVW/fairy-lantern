@@ -14,6 +14,7 @@ mod ppu;
 mod recents;
 mod rtc;
 mod savestate;
+mod statedbg;
 mod sound;
 mod timers;
 mod tui;
@@ -101,6 +102,12 @@ enum Commands {
         /// Pulse Start+A after boot (advance title → menu on commercial ROMs)
         #[arg(long)]
         auto_input: bool,
+        /// Load the ROM's `.flst` before running
+        #[arg(long)]
+        load_state: bool,
+        /// Write `.flst` + shot + debug report after the run
+        #[arg(long)]
+        save_state: bool,
     },
     /// Home TUI (same as bare command)
     Tui {
@@ -160,6 +167,8 @@ fn real_main() -> Result<()> {
             present,
             bios,
             auto_input,
+            load_state,
+            save_state,
         }) => {
             run_rom(
                 &rom,
@@ -168,6 +177,8 @@ fn real_main() -> Result<()> {
                 present,
                 bios.as_ref(),
                 auto_input,
+                load_state,
+                save_state,
             )?;
         }
         Some(Commands::Tui { dir: _ }) => {
@@ -189,6 +200,8 @@ fn real_main() -> Result<()> {
                         cli.dump.as_ref(),
                         cli.present,
                         cli.bios.as_ref(),
+                        false,
+                        false,
                         false,
                     )?;
                 } else {
@@ -257,6 +270,8 @@ fn run_rom(
     present: bool,
     bios: Option<&PathBuf>,
     auto_input: bool,
+    load_state: bool,
+    save_state: bool,
 ) -> Result<()> {
     let cart = Cart::load(rom)?;
     cart::print_info(&cart);
@@ -265,6 +280,17 @@ fn run_rom(
         println!("  auto-input: Start+A pulses after boot (title advance)");
     }
     let mut emu = Emu::from_cart(cart, bios.map(|p| p.as_path()));
+    emu.attach_rom_path(rom);
+    if load_state {
+        let Some(path) = emu.state_path() else {
+            anyhow::bail!("no savestate path for this ROM");
+        };
+        savestate::load(&mut emu, &path)?;
+        println!("  loaded state ← {}", path.display());
+    }
+    if load_state || save_state {
+        emu.bus.sound.start_host();
+    }
     let ai = if auto_input {
         Some(emu::AutoInput::title_advance())
     } else {
@@ -486,6 +512,19 @@ fn run_rom(
     println!("  frame → {}", dump_path.display());
     if present && !video::present_terminal(&emu.ppu.frame) {
         println!("  (chafa unavailable)");
+    }
+    if save_state {
+        let Some(path) = emu.state_path() else {
+            anyhow::bail!("no savestate path for this ROM");
+        };
+        savestate::save(&emu, &path)?;
+        println!(
+            "  saved state → {} + {} + {}",
+            path.display(),
+            crate::video::shot_path_for_state(&path).display(),
+            crate::statedbg::dbg_path_for_state(&path).display()
+        );
+        emu.bus.sound.stop_host();
     }
     Ok(())
 }

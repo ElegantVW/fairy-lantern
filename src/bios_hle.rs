@@ -5,12 +5,38 @@ use crate::cpu::Cpu;
 
 /// ARM SWI: GBA BIOS uses the low 8 bits of the 24-bit comment field.
 pub fn swi_arm(cpu: &mut Cpu, bus: &mut Bus, op: u32) {
+    enter_svc(cpu);
     dispatch(cpu, bus, (op & 0xFF) as u8);
+    leave_svc(cpu);
 }
 
 /// Thumb SWI: low 8 bits.
 pub fn swi_thumb(cpu: &mut Cpu, bus: &mut Bus, op: u32) {
+    enter_svc(cpu);
     dispatch(cpu, bus, (op & 0xFF) as u8);
+    leave_svc(cpu);
+}
+
+/// ARMv4: LR_svc = next insn (PC already advanced), SPSR = CPSR, SVC+ARM+I.
+fn enter_svc(cpu: &mut Cpu) {
+    let lr = cpu.r[15];
+    let spsr = cpu.cpsr;
+    cpu.set_mode(0x13);
+    cpu.spsr = spsr;
+    cpu.cpsr.irq_disable = true;
+    cpu.cpsr.thumb = false;
+    cpu.cpsr.mode = 0x13;
+    cpu.r[14] = lr;
+}
+
+/// SoftReset etc. leave SVC themselves — do not undo that.
+fn leave_svc(cpu: &mut Cpu) {
+    if cpu.cpsr.mode & 0x1F != 0x13 {
+        return;
+    }
+    let ret = cpu.r[14];
+    cpu.restore_spsr();
+    cpu.r[15] = ret;
 }
 
 fn dispatch(cpu: &mut Cpu, bus: &mut Bus, num: u8) {
@@ -386,8 +412,7 @@ fn write_decomp(bus: &mut Bus, addr: u32, val: u8, to_vram: bool) {
         } else {
             (cur & 0x00FF) | ((val as u16) << 8)
         };
-        // Direct VRAM poke — avoid IO side effects on write16
-        let off = (a as usize) & 0x1FFFF;
+        let off = crate::bus::vram_index(a);
         if off + 1 < bus.vram.len() {
             let bytes = v.to_le_bytes();
             bus.vram[off] = bytes[0];
@@ -605,6 +630,27 @@ mod tests {
             inner_name: None,
         };
         (Cpu::new(), Bus::new(&cart, None))
+    }
+
+    #[test]
+    fn swi_enters_svc_then_returns_to_caller() {
+        let (mut cpu, mut bus) = harness();
+        cpu.set_mode(0x1F);
+        cpu.r[13] = 0x0300_7F00;
+        cpu.set_mode(0x13);
+        cpu.r[13] = 0x0300_7FE0;
+        cpu.set_mode(0x1F);
+        cpu.cpsr.thumb = true;
+        cpu.r[0] = 200;
+        cpu.r[15] = 0x0800_0102;
+        swi_thumb(&mut cpu, &mut bus, 0xDF08);
+        assert_eq!(cpu.r[0], 14);
+        assert_eq!(cpu.cpsr.mode & 0x1F, 0x1F, "back in SYS");
+        assert!(cpu.cpsr.thumb, "T bit restored from SPSR");
+        assert_eq!(cpu.r[15], 0x0800_0102, "PC is next insn");
+        assert_eq!(cpu.r[13], 0x0300_7F00, "user SP intact");
+        cpu.set_mode(0x13);
+        assert_eq!(cpu.r[13], 0x0300_7FE0, "SVC SP not smashed");
     }
 
     #[test]

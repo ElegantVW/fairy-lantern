@@ -6,6 +6,11 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
+/// Sidecar screenshot next to a `.flst` (`stem.ppm`).
+pub fn shot_path_for_state(state: &Path) -> std::path::PathBuf {
+    state.with_extension("ppm")
+}
+
 pub fn write_ppm(path: &Path, frame: &[u16]) -> Result<()> {
     let rgb = render::frame_to_rgb(frame);
     let mut f = std::fs::File::create(path)

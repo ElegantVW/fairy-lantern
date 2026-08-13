@@ -103,20 +103,16 @@ fn tick_channel(
                 raise_timer(bus, i);
             }
             cascade_next(t, bus, i, ov);
-            // Cap pathological multi-overflow storms from huge cycle slices
-            if left > period.saturating_mul(64) {
+            // Remaining whole periods: count every overflow (FIFO sample clock).
+            // IF is a bit — raise once. Cascade uses a closed form, not a 16-cap.
+            if left >= period {
                 let extra = left / period;
                 left %= period;
-                let n = extra.min(16);
-                ov[i] = ov[i].saturating_add(n);
+                ov[i] = ov[i].saturating_add(extra);
                 if ctrl & 0x40 != 0 {
-                    for _ in 0..n {
-                        raise_timer(bus, i);
-                    }
+                    raise_timer(bus, i);
                 }
-                for _ in 0..n {
-                    cascade_next(t, bus, i, ov);
-                }
+                cascade_add(t, bus, i, extra, ov);
                 counter = reload.wrapping_add(left).min(0xFFFF);
                 left = 0;
             }
@@ -124,6 +120,38 @@ fn tick_channel(
     }
     t.counter[i] = counter;
     bus.write16_raw(0x0400_0100 + i as u32 * 4, counter as u16);
+}
+
+/// Add `n` cascade ticks to timer i+1 (and chain) without a 16-overflow cap.
+fn cascade_add(t: &mut Timers, bus: &mut Bus, i: usize, n: u32, ov: &mut [u32; 4]) {
+    if n == 0 || i + 1 >= 4 {
+        return;
+    }
+    let nxt = i + 1;
+    let nctrl = bus.timer_ctrl_prev[nxt];
+    if nctrl & 0x80 == 0 || nctrl & 0x4 == 0 {
+        return;
+    }
+    let reload = (t.reload[nxt] as u32) & 0xFFFF;
+    let period = (0x1_0000u32 - reload).max(1);
+    let start = t.counter[nxt] & 0xFFFF;
+    let room = 0x1_0000u32 - start;
+    if n < room {
+        let nc = start + n;
+        t.counter[nxt] = nc;
+        bus.write16_raw(0x0400_0100 + nxt as u32 * 4, nc as u16);
+        return;
+    }
+    let after_first = n - room;
+    let extra_ov = 1 + after_first / period;
+    let rem = after_first % period;
+    t.counter[nxt] = reload.wrapping_add(rem).min(0xFFFF);
+    bus.write16_raw(0x0400_0100 + nxt as u32 * 4, t.counter[nxt] as u16);
+    ov[nxt] = ov[nxt].saturating_add(extra_ov);
+    if nctrl & 0x40 != 0 {
+        raise_timer(bus, nxt);
+    }
+    cascade_add(t, bus, nxt, extra_ov, ov);
 }
 
 fn cascade_next(t: &mut Timers, bus: &mut Bus, i: usize, ov: &mut [u32; 4]) {
@@ -205,5 +233,24 @@ mod tests {
         emu.bus.apply_timer_starts(&mut emu.timers);
         let ov = step(&mut emu.timers, &mut emu.bus, 40);
         assert_eq!(ov[0], 4, "40 cycles / 10-tick period");
+    }
+
+    #[test]
+    fn many_overflows_are_all_counted() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut emu = Emu::new(&cart, None);
+        // period 10; 800 cycles → 80 overflows (old cap would report 17)
+        emu.bus.write16(0x0400_0100, (0x10000u32 - 10) as u16);
+        emu.bus.write16(0x0400_0102, 0x0080);
+        emu.bus.apply_timer_starts(&mut emu.timers);
+        let ov = step(&mut emu.timers, &mut emu.bus, 800);
+        assert_eq!(ov[0], 80, "must not clip FIFO sample clocks at 16");
     }
 }

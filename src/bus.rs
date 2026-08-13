@@ -239,6 +239,13 @@ impl Bus {
                     } else {
                         (v >> 8) as u8
                     }
+                } else if a == 0x0400_0084 {
+                    // Bits 0–3 are live PSG-on flags (read-only). Bit 7 is master.
+                    (self.io.get(0x84).copied().unwrap_or(0) & 0x80)
+                        | self.sound.psg_channel_status()
+                } else if (0x0400_0090..=0x0400_009F).contains(&a) {
+                    self.sound
+                        .psg_get_wave_byte((a - 0x0400_0090) as u8)
                 } else {
                     self.io
                         .get((a as usize) & (IO_SIZE - 1))
@@ -315,6 +322,9 @@ impl Bus {
     }
 
     fn read_save(&self, addr: u32) -> u8 {
+        if self.save_type == SaveType::None {
+            return 0xFF;
+        }
         if let Some(ref flash) = self.flash {
             return flash.read(addr);
         }
@@ -413,6 +423,9 @@ impl Bus {
     }
 
     fn write_save(&mut self, addr: u32, val: u8) {
+        if self.save_type == SaveType::None {
+            return;
+        }
         if let Some(ref mut flash) = self.flash {
             if flash.write(addr, val) {
                 self.save_dirty = true;
@@ -574,12 +587,21 @@ impl Bus {
                     self.write16_raw(a, val & !((1 << 11) | (1 << 15)));
                     return;
                 }
-                // SOUNDCNT_X — master enable
+                // SOUNDCNT_X — only bit 7 is writable; 0–3 are live PSG status.
                 0x0400_0084 => {
                     if crate::cpu::fairy_trace() {
                         eprintln!("ioW {:08X}={:04X} evt{}", a, val, self.dbg_evt);
                     }
+                    self.write16_raw(a, val & 0x80);
+                    if val & 0x80 == 0 {
+                        self.sound.psg_all_off();
+                    }
+                    return;
+                }
+                // SOUND3CNT_L — wave dimension / bank / DAC
+                0x0400_0070 => {
                     self.write16_raw(a, val);
+                    self.sound.psg_sync_wave(val);
                     return;
                 }
                 0x0400_00BA | 0x0400_00DE => {
@@ -629,6 +651,7 @@ impl Bus {
                 | 0x0400_009C
                 | 0x0400_009E => {
                     self.write16_raw(a, val);
+                    self.sound.psg_sync_wave(self.read16(0x0400_0070));
                     let off = (a - 0x0400_0090) as u8;
                     self.sound.psg_set_wave_byte(off, (val & 0xFF) as u8);
                     self.sound
@@ -935,12 +958,14 @@ impl Bus {
     }
 }
 
-fn vram_index(addr: u32) -> usize {
+/// GBATEK: 96K VRAM (64K+32K) repeats every 128K; the upper 32K of each
+/// 128K window mirrors the OBJ 32K (`06018000` → `06010000`), not `% 96K`.
+pub(crate) fn vram_index(addr: u32) -> usize {
     let a = (addr as usize) & 0x1FFFF;
-    if a < VRAM_SIZE {
-        a
+    if a >= 0x18000 {
+        a - 0x8000
     } else {
-        a % VRAM_SIZE
+        a
     }
 }
 
@@ -948,6 +973,41 @@ fn vram_index(addr: u32) -> usize {
 mod tests {
     use super::*;
     use crate::cart::Cart;
+
+    #[test]
+    fn untagged_cart_ignores_sram_window() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut bus = Bus::new(&cart, None);
+        assert_eq!(bus.save_type, SaveType::None);
+        bus.write8(0x0E00_0000, 0x42);
+        assert!(!bus.save_dirty, "must not invent a battery");
+        assert_eq!(bus.read8(0x0E00_0000), 0xFF);
+    }
+
+    #[test]
+    fn soundcnt_x_live_bits_not_writable() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut bus = Bus::new(&cart, None);
+        bus.write16(0x0400_0084, 0x008F);
+        assert_eq!(bus.read16(0x0400_0084) & 0x80, 0x80);
+        assert_eq!(bus.read16(0x0400_0084) & 0x0F, 0, "bits 0–3 are live, not latched");
+        bus.write16(0x0400_0084, 0);
+        assert_eq!(bus.read16(0x0400_0084) & 0x80, 0);
+    }
 
     #[test]
     fn bios_hidden_when_pc_outside() {
@@ -964,6 +1024,30 @@ mod tests {
         assert_eq!(bus.read8(0), 0, "ROM code must not dump BIOS");
         bus.exec_pc = 0x0000_0138;
         assert_eq!(bus.read8(0), 0xEA, "BIOS code can read the image");
+    }
+
+    #[test]
+    fn vram_128k_window_mirrors_obj_not_bg() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut bus = Bus::new(&cart, None);
+        bus.write8(0x0601_0000, 0xAB);
+        bus.write8(0x0600_0000, 0x11);
+        assert_eq!(bus.read8(0x0601_8000), 0xAB, "06018000 mirrors OBJ 32K");
+        assert_ne!(bus.read8(0x0601_8000), 0x11, "must not wrap onto BG 64K");
+        bus.write8(0x0601_8004, 0xCD);
+        assert_eq!(bus.read8(0x0601_0004), 0xCD);
+        bus.write8(0x0602_0008, 0xEF); // +128K → same 64K BG
+        assert_eq!(bus.read8(0x0600_0008), 0xEF);
+        assert_eq!(vram_index(0x0601_8000), 0x10000);
+        assert_eq!(vram_index(0x0600_FFFF), 0x0FFFF);
+        assert_eq!(vram_index(0x0601_7FFF), 0x17FFF);
     }
 
     #[test]

@@ -194,6 +194,28 @@ mod tests {
     }
 
     #[test]
+    fn fight_savestate_hp_bar_row_is_lit() {
+        let rom = std::path::Path::new(
+            "/home/evenweaker/.local/share/faeos/fairy-lantern/roms/Pokemon Liquid Crystal (v3.3.00512).gba",
+        );
+        let st = std::path::Path::new(
+            "/home/evenweaker/.local/share/faeos/fairy-lantern/states/Pokemon Liquid Crystal (v3.3.00512).flst",
+        );
+        if !rom.exists() || !st.exists() {
+            return;
+        }
+        let mut emu = crate::emu::Emu::from_path(rom, None).expect("load LC ROM");
+        crate::savestate::load(&mut emu, st).expect("load fight state");
+        render::render_scanline(&emu.bus, 89, &mut emu.ppu.frame);
+        let px = emu.ppu.frame[89 * WIDTH + 160];
+        assert_ne!(
+            px & 0x7FFF,
+            0,
+            "player HP bar row y=89 x=160 must be lit after compositor fix"
+        );
+    }
+
+    #[test]
     fn hblank_starts_at_1006_not_end_of_line() {
         let mut ppu = Ppu::new();
         let mut bus = empty_bus();
