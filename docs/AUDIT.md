@@ -66,7 +66,7 @@ Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`
 | 11 | SoftReset / Sqrt / RegisterRamReset | **Partial** — SoftReset + integer Sqrt; IWRAM keeps last 0x200; bit7 clears IO not CPU |
 | 12 | HBlank at end of 1232-cycle line | **Fixed** (`HBLANK_CYCLE = 1006`) |
 | 13 | Affine identity / PD caps | **Gated** — still default-on; `FAIRY_ACCURATE_AFFINE=1` disables |
-| 14 | DMA3 video capture | **Open** |
+| 14 | DMA3 video capture | **Fixed** — special DMA3 one line per HBlank, VCOUNT 2..=161, off at 162 |
 | 15 | Timer overflow storms capped at 16 | **Fixed** — all overflows counted; cascade closed-form; IF raised once |
 | 16 | m4a BIOS HLE guess / fake PCM | **Stubbed** — no IWRAM writes; LC uses ROM mixer |
 | 17 | Waitstates averaged | **Partial** — WS0/1/2 N+S (S=2/4/8), SRAM from WAITCNT; prefetch still a 1-cycle stand-in |

@@ -97,6 +97,36 @@ impl DmaController {
 
     pub fn on_hblank(&mut self, bus: &mut Bus) {
         self.run_timing(bus, Timing::HBlank);
+        self.run_video_capture(bus);
+    }
+
+    /// DMA3 start=Special: one scanline per HBlank, VCOUNT 2..=161, off at 162.
+    fn run_video_capture(&mut self, bus: &mut Bus) {
+        const CH: usize = 3;
+        if !self.ch[CH].active {
+            return;
+        }
+        if (self.ch[CH].ctrl >> 12) & 3 != Timing::Special as u16 {
+            return;
+        }
+        let vcount = bus.read16(0x0400_0006);
+        if vcount == 162 {
+            let irq = self.ch[CH].ctrl & (1 << 14) != 0;
+            let new_h = self.ch[CH].ctrl & !0x8000;
+            self.ch[CH].ctrl = new_h;
+            self.ch[CH].active = false;
+            bus.write16_raw(0x0400_00DE, new_h);
+            if irq {
+                crate::irq::raise(bus, crate::irq::IRQ_DMA3);
+            }
+            return;
+        }
+        if !(2..=161).contains(&vcount) {
+            return;
+        }
+        let mut c = self.ch[CH].clone();
+        run_transfer(bus, CH, &mut c);
+        self.ch[CH] = c;
     }
 
     /// Called after sound mix when FIFOs are half-empty (sample-timer path).
@@ -309,5 +339,48 @@ mod tests {
         assert_eq!(emu.bus.sound.fifo_a_len(), 16, "FIFO special DMA is 4 words");
         assert_eq!(emu.bus.dma.ch[1].src, 0x0300_0010);
         assert!(emu.bus.dma.ch[1].active, "repeat keeps the channel live");
+    }
+
+    #[test]
+    fn dma3_video_capture_one_line_then_stops() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut emu = Emu::new(&cart, None);
+        for i in 0..8u32 {
+            emu.bus.write16(0x0200_0000 + i * 2, (0x100 + i) as u16);
+        }
+        emu.bus.write32(0x0400_00D4, 0x0200_0000);
+        emu.bus.write32(0x0400_00D8, 0x0600_0000);
+        emu.bus.write16(0x0400_00DC, 4);
+        // enable + repeat + special + 16-bit
+        emu.bus.write16(0x0400_00DE, 0xB200);
+        assert!(emu.bus.dma.ch[3].active);
+
+        emu.bus.set_vcount(0);
+        let mut dma = std::mem::take(&mut emu.bus.dma);
+        dma.on_hblank(&mut emu.bus);
+        emu.bus.dma = dma;
+        assert_eq!(emu.bus.read16(0x0600_0000), 0, "no capture on line 0");
+
+        emu.bus.set_vcount(2);
+        let mut dma = std::mem::take(&mut emu.bus.dma);
+        dma.on_hblank(&mut emu.bus);
+        emu.bus.dma = dma;
+        assert_eq!(emu.bus.read16(0x0600_0000), 0x100);
+        assert_eq!(emu.bus.read16(0x0600_0006), 0x103);
+        assert!(emu.bus.dma.ch[3].active);
+
+        emu.bus.set_vcount(162);
+        let mut dma = std::mem::take(&mut emu.bus.dma);
+        dma.on_hblank(&mut emu.bus);
+        emu.bus.dma = dma;
+        assert!(!emu.bus.dma.ch[3].active, "capture ends at VCOUNT 162");
+        assert_eq!(emu.bus.read16(0x0400_00DE) & 0x8000, 0);
     }
 }
