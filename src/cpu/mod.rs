@@ -668,6 +668,26 @@ mod tests {
     }
 
     #[test]
+    fn data_proc_reg_shift_costs_extra_cycle() {
+        // MOV r0, r1, LSL r2  vs  MOV r0, r1
+        let cart = cart_with(&[0xE1A0_0211, 0xE1A0_0001]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_mode(0x1F);
+        cpu.r[1] = 4;
+        cpu.r[2] = 1;
+        cpu.set_pc(0x0300_0000);
+        bus.write32(0x0300_0000, 0xE1A0_0211);
+        bus.write32(0x0300_0004, 0xE1A0_0001);
+        let c_shift = cpu.step(&mut bus);
+        assert_eq!(cpu.r[0], 8);
+        cpu.set_pc(0x0300_0004);
+        let c_mov = cpu.step(&mut bus);
+        assert_eq!(c_shift, c_mov + 1, "Rs shift is +1 I-cycle");
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
     fn ldr_reg_lsl_offset() {
         // LDR r2, [r0, r1, LSL #2]
         let cart = cart_with(&[0xE790_2101]);

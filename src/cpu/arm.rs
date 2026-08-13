@@ -358,6 +358,8 @@ fn data_processing(cpu: &mut Cpu, _bus: &mut Bus, op: u32) -> u32 {
     let s = (op & (1 << 20)) != 0;
     let rn_i = ((op >> 16) & 0xF) as usize;
     let rd = ((op >> 12) & 0xF) as usize;
+    let reg_shift = op & (1 << 25) == 0 && op & (1 << 4) != 0;
+    let extra = if reg_shift { 1 } else { 0 };
     let rn = if rn_i == 15 {
         cpu.pc_arm_read()
     } else {
@@ -446,7 +448,7 @@ fn data_processing(cpu: &mut Cpu, _bus: &mut Bus, op: u32) -> u32 {
         } else {
             cpu.r[15] = result & !3;
         }
-        return 3;
+        return 3 + extra;
     }
 
     if s && rd != 15 {
@@ -472,7 +474,7 @@ fn data_processing(cpu: &mut Cpu, _bus: &mut Bus, op: u32) -> u32 {
         }
     }
 
-    1
+    1 + extra
 }
 
 fn ldrh_strh(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {

@@ -101,13 +101,13 @@ pub fn render_scanline_affine(affine: AffineRefs, bus: &Bus, y: usize, frame: &m
             }
         }
         3 => {
-            mode3_into(bus, y, &mut top);
+            mode3_into(bus, y, &win_mask, &mut top);
         }
         4 => {
-            mode4_into(bus, y, dispcnt, &mut top);
+            mode4_into(bus, y, dispcnt, &win_mask, &mut top);
         }
         5 => {
-            mode5_into(bus, y, dispcnt, &mut top);
+            mode5_into(bus, y, dispcnt, &win_mask, &mut top);
         }
         _ => {}
     }
@@ -654,9 +654,13 @@ fn composite_affine_bg(
 
 // ── Bitmap modes ─────────────────────────────────────────────────────
 
-fn mode3_into(bus: &Bus, y: usize, top: &mut [Slot; WIDTH]) {
+fn mode3_into(bus: &Bus, y: usize, win_mask: &[u8; WIDTH], top: &mut [Slot; WIDTH]) {
+    const BG2: u8 = 1 << 2;
     let base = y * WIDTH * 2;
     for x in 0..WIDTH {
+        if win_mask[x] & BG2 == 0 {
+            continue;
+        }
         top[x] = Slot {
             color: vram_u16(bus, base + x * 2),
             prio: 0,
@@ -666,10 +670,20 @@ fn mode3_into(bus: &Bus, y: usize, top: &mut [Slot; WIDTH]) {
     }
 }
 
-fn mode4_into(bus: &Bus, y: usize, dispcnt: u16, top: &mut [Slot; WIDTH]) {
+fn mode4_into(
+    bus: &Bus,
+    y: usize,
+    dispcnt: u16,
+    win_mask: &[u8; WIDTH],
+    top: &mut [Slot; WIDTH],
+) {
+    const BG2: u8 = 1 << 2;
     let page = if dispcnt & 0x10 != 0 { 0xA000 } else { 0 };
     let base = page + y * WIDTH;
     for x in 0..WIDTH {
+        if win_mask[x] & BG2 == 0 {
+            continue;
+        }
         let idx = vram_u8(bus, base + x) as usize;
         top[x] = Slot {
             color: pal_color(bus, idx),
@@ -680,13 +694,23 @@ fn mode4_into(bus: &Bus, y: usize, dispcnt: u16, top: &mut [Slot; WIDTH]) {
     }
 }
 
-fn mode5_into(bus: &Bus, y: usize, dispcnt: u16, top: &mut [Slot; WIDTH]) {
+fn mode5_into(
+    bus: &Bus,
+    y: usize,
+    dispcnt: u16,
+    win_mask: &[u8; WIDTH],
+    top: &mut [Slot; WIDTH],
+) {
     if y >= 128 {
         return;
     }
+    const BG2: u8 = 1 << 2;
     let page = if dispcnt & 0x10 != 0 { 0xA000 } else { 0 };
     let base = page + y * 160 * 2;
     for x in 0..WIDTH.min(160) {
+        if win_mask[x] & BG2 == 0 {
+            continue;
+        }
         top[x] = Slot {
             color: vram_u16(bus, base + x * 2),
             prio: 0,

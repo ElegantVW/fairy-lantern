@@ -617,6 +617,15 @@ impl Bus {
                     self.write16_raw(a, (val & !7) | (cur & 7));
                     return;
                 }
+                0x0400_0048 | 0x0400_004A => {
+                    // WININ / WINOUT: bits 6–7 / 14–15 unused
+                    self.write16_raw(a, val & 0x3F3F);
+                    return;
+                }
+                0x0400_0050 => {
+                    self.write16_raw(a, val & 0x3FFF);
+                    return;
+                }
                 0x0400_0200 => {
                     self.write16_raw(a, val & 0x3FFF);
                     return;
@@ -649,6 +658,7 @@ impl Bus {
                 0x0400_0102 | 0x0400_0106 | 0x0400_010A | 0x0400_010E => {
                     let idx = ((a - 0x0400_0102) / 4) as usize;
                     let prev = self.timer_ctrl_prev.get(idx).copied().unwrap_or(0);
+                    let val = val & 0xC7; // presc, cascade, IRQ, enable
                     self.write16_raw(a, val);
                     if crate::cpu::fairy_trace() {
                         eprintln!("ioW {:08X}={:04X} evt{}", a, val, self.dbg_evt);
@@ -1478,5 +1488,11 @@ mod tests {
             "IF bits 14–15 do not exist"
         );
         assert_eq!(bus.read16(0x0400_0202) & 1, 1, "W1C unused bits leave IF");
+        bus.write16(0x0400_0048, 0xFFFF);
+        assert_eq!(bus.read16(0x0400_0048), 0x3F3F, "WININ unused bits");
+        bus.write16(0x0400_0050, 0xFFFF);
+        assert_eq!(bus.read16(0x0400_0050), 0x3FFF, "BLDCNT unused bits");
+        bus.write16(0x0400_0102, 0x00FF);
+        assert_eq!(bus.read16(0x0400_0102), 0x00C7, "TMxCNT unused bits");
     }
 }
