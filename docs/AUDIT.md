@@ -69,7 +69,7 @@ Affine identity/PD hacks remain **on** by default. Fight HP bars work (`a3958ac`
 | 14 | DMA3 video capture | **Open** |
 | 15 | Timer overflow storms capped at 16 | **Fixed** — all overflows counted; cascade closed-form; IF raised once |
 | 16 | m4a BIOS HLE guess / fake PCM | **Stubbed** — no IWRAM writes; LC uses ROM mixer |
-| 17 | Waitstates averaged | **Partial** — sequential vs N fetch + LDR/STR data waits; no real prefetch buffer |
+| 17 | Waitstates averaged | **Partial** — WS0/1/2 N+S (S=2/4/8), SRAM from WAITCNT; prefetch still a 1-cycle stand-in |
 | 18 | VRAM `% 96K` | **Fixed** — 128K window, upper 32K mirrors OBJ |
 | 19 | Unknown save → 64K SRAM | **Fixed** — untagged cart is `SaveType::None` (no SRAM poke) |
 | 20 | Flash IDs / erase approximate | **Partial** — AMD 80+AA/55+10/30 erase works; IDs still hardcoded Sanyo/SST |

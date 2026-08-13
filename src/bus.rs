@@ -854,17 +854,28 @@ impl Bus {
                 };
                 total.saturating_sub(1)
             }
-            0x0E | 0x0F => 4,
+            0x0E | 0x0F => self.sram_wait().saturating_sub(1),
             _ => 1,
+        }
+    }
+
+    /// GBATEK: SRAM/Flash 0x0E wait = WAITCNT bits 0–1 → 4,3,2,8.
+    fn sram_wait(&self) -> u32 {
+        match self.read16(0x0400_0204) & 3 {
+            0 => 4,
+            1 => 3,
+            2 => 2,
+            _ => 8,
         }
     }
 
     fn rom_ns(&self, addr: u32) -> (u32, u32) {
         let waitcnt = self.read16(0x0400_0204);
-        let (n_shift, s_bit) = match addr >> 24 {
-            0x08 | 0x09 => (2u32, 4u32),
-            0x0A | 0x0B => (5, 7),
-            _ => (8, 10),
+        // S-cycle when the sequential bit is 0: WS0=2, WS1=4, WS2=8.
+        let (n_shift, s_bit, s_slow) = match addr >> 24 {
+            0x08 | 0x09 => (2u32, 4u32, 2u32),
+            0x0A | 0x0B => (5, 7, 4),
+            _ => (8, 10, 8),
         };
         let n = (waitcnt >> n_shift) & 3;
         let n_cycles = match n {
@@ -873,7 +884,11 @@ impl Bus {
             2 => 2,
             _ => 8,
         };
-        let s_cycles = if waitcnt & (1 << s_bit) != 0 { 1 } else { 2 };
+        let s_cycles = if waitcnt & (1 << s_bit) != 0 {
+            1
+        } else {
+            s_slow
+        };
         (n_cycles, s_cycles)
     }
 
@@ -900,7 +915,7 @@ impl Bus {
                 let total = if bytes >= 4 { n.saturating_add(s) } else { n };
                 total.saturating_sub(1)
             }
-            0x0E | 0x0F => 4,
+            0x0E | 0x0F => self.sram_wait().saturating_sub(1),
             _ => 0,
         }
     }
@@ -1089,5 +1104,45 @@ mod tests {
         assert!(w32 > w16);
         let iwram = bus.data_waitstates(0x0300_0000, 4);
         assert_eq!(iwram, 0);
+    }
+
+    #[test]
+    fn ws1_ws2_sequential_use_gbatek_s() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut bus = Bus::new(&cart, None);
+        // WAITCNT=0: WS1 S=4, WS2 S=8
+        let _ = bus.fetch_waitstates(0x0A00_0000);
+        assert_eq!(bus.fetch_waitstates(0x0A00_0004), 3, "WS1 S=4 extra");
+        let _ = bus.fetch_waitstates(0x0C00_0000);
+        assert_eq!(bus.fetch_waitstates(0x0C00_0004), 7, "WS2 S=8 extra");
+        // sequential bits on: S=1 for all
+        bus.write16(0x0400_0204, (1 << 7) | (1 << 10));
+        let _ = bus.fetch_waitstates(0x0A00_0000);
+        assert_eq!(bus.fetch_waitstates(0x0A00_0004), 0, "WS1 S=1 extra");
+        let _ = bus.fetch_waitstates(0x0C00_0000);
+        assert_eq!(bus.fetch_waitstates(0x0C00_0004), 0, "WS2 S=1 extra");
+    }
+
+    #[test]
+    fn sram_wait_follows_waitcnt() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut bus = Bus::new(&cart, None);
+        assert_eq!(bus.data_waitstates(0x0E00_0000, 1), 3, "default SRAM 4-1");
+        bus.write16(0x0400_0204, 3);
+        assert_eq!(bus.data_waitstates(0x0E00_0000, 1), 7, "SRAM wait 8-1");
     }
 }
