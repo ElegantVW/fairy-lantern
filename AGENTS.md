@@ -3,9 +3,9 @@
 GBA emulator in Rust. Canonical tree is this independent repo (`ElegantVW/fairy-lantern`).
 The copy at `faeos/fairy-lantern` is stale and should not be edited.
 
-## Status (2026-08-13)
+## Status (2026-08-14)
 
-v0.10.0. Restore point for **listenable intro music**: tag `sacred/sound-working`
+v0.11.0. Restore point for **listenable intro music**: tag `sacred/sound-working`
 / branch `checkpoint/sound-working` (`7816e1b`). The working tree is **ahead** of
 that tag: fight HP bars, Flash 128K erase, `FAELST05`, F5 shot+`.dbg.txt`,
 pacing recovery, SWI→SVC, timer overflow counts, CI, unused-IO open bus,
@@ -16,8 +16,9 @@ can finish an in-game FLASH save, and can fight (HUD, EXP). Affine identity/PD
 hacks are **off** by default (hardware matrix). `FAIRY_AFFINE_COMPAT=1` restores
 the old rewrite if a battle HUD/camera collapses.
 
-This is **not** a commercial GBA emulator and **not** mGBA-class. Remaining
-holes: [docs/AUDIT.md](docs/AUDIT.md).
+This is **not** mGBA-class. v0.11 closed the BIOS IntrWait/IME contract,
+CHECK_FLAG latch, HLE boot stacks, untagged SRAM promote, SIO complete,
+and Linux joystick → KEYINPUT. Remaining holes: [docs/AUDIT.md](docs/AUDIT.md).
 Sound path: [docs/SOUND_AUDIT.md](docs/SOUND_AUDIT.md).
 Old boot-hang write-up: [docs/SOUND_INVESTIGATION.md](docs/SOUND_INVESTIGATION.md).
 
@@ -83,36 +84,24 @@ OAM, pals, sound). Copies: `/tmp/fairy-lantern-state.ppm` and `.dbg.txt`.
 Affine identity/PD rewrites are **off**. If a **battle** HUD/camera collapses,
 try `FAIRY_AFFINE_COMPAT=1`.
 
-## Input (now / later)
+## Input
 
-**Now:** keyboard only. `play::poll_keys` ORs minifb keys into the 10-bit
-GBA `KEYINPUT` mask (0 = pressed):
+Keyboard and a Linux joystick (`/dev/input/js0`–`js3`) OR into the same
+10-bit GBA `KEYINPUT` mask (0 = pressed). No pad → keyboard only; a
+vanished pad is not a hang.
 
-| GBA | Keys |
-|-----|------|
-| A | Z, Space, J |
-| B | X, K |
-| L / R | Q / E |
-| Start / Select | Enter / RightShift or Backspace |
-| D-pad | arrows or WASD |
-| Pause / state | P / F5 / F7 / F8 / Esc |
+| GBA | Keys | Pad |
+|-----|------|-----|
+| A | Z, Space, J | button 0/2 |
+| B | X, K | button 1/3 |
+| L / R | Q / E | button 4 / 5 |
+| Start / Select | Enter / RightShift or Backspace | button 7/9 / 6/8 |
+| D-pad | arrows or WASD | axis 0/1 or hat 6/7 (deadzone ~0.5) |
+| Pause / state | P / F5 / F7 / F8 / Esc | L2 save · R2 load |
+| Turbo on/off | C | pad X (west) |
+| Turbo 2×/3×/4× | V | pad Y (north) |
 
-minifb 0.27 has **no** gamepad API. Controllers do nothing today.
-
-**Later (do not start until the LC campaign gate is boring):** map a host
-gamepad onto the **same** `KEYINPUT` bits. That is a commercial advantage
-(couch play) but it is not a current objective.
-
-When we do it:
-
-- Keep keyboard working; OR pads into the same mask (do not replace keys).
-- Prefer `gilrs` (cross-platform) or Linux `evdev`; do not block the 59.73 Hz
-  loop on device enumerate.
-- Standard layout: face A/B, Start/Select, shoulders L/R, d-pad. Left stick
-  → d-pad with a deadzone (~0.4). Ignore gyro/touch/rumble for v1.
-- Hotplug: if the pad vanishes, fall back to keyboard without a hang.
-- Do not send analog into KEYINPUT; the GBA keypad is digital.
-- Test: LC overworld walk + fight menu with pad only, then keyboard only.
+Do not send analog into KEYINPUT; the GBA keypad is digital.
 
 ## Headless
 

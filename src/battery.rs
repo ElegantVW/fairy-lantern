@@ -68,8 +68,9 @@ pub fn detect(rom: &[u8]) -> SaveType {
         // and auto-narrow on short address streams (see EepromChip).
         return SaveType::Eeprom8K;
     }
-    // Untagged carts: do not invent SRAM. Writing SRAM protocol onto Flash or
-    // EEPROM would corrupt a real battery. Homebrew must carry an SDK string.
+    // Untagged carts stay None at detect time. First write to 0x0E000000
+    // promotes to SRAM (homebrew without an SDK string). Flash/EEPROM carts
+    // carry a tag, so they never sit on None.
     SaveType::None
 }
 

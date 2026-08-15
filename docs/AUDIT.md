@@ -14,21 +14,22 @@ plays intro/title through real DirectSound FIFOs, can finish an in-game FLASH
 save, and can fight (HP/EXP HUD). CPU, IRQ, timers, FIFO DMA, and the ARM
 `STRB [Rn, Rm]` addressing-mode-2 bug were the load-bearing fixes.
 
-It is **not** a commercial GBA emulator and **not** mGBA-class. Unknown opcodes
-still NOP (first 8 log), PSG is unproven on LC, affine identity/PD hacks are
-off by default (`FAIRY_AFFINE_COMPAT=1` restores them), there are no PPU goldens, the host is Linux `pw-cat`, and only one
-title has been walked. SWI enters SVC for HLE; untagged carts do not invent SRAM.
+It is **not** mGBA-class. v0.11 boots a second legal RPG (Anguna splash +
+POWDER menu) after fixing ARM `Rm=PC` (+8 vs +12) and the BIOS IntrWait/IME
+contract. Unknown opcodes still NOP, PSG is unproven on LC, affine hacks are
+off by default, the host is Linux `pw-cat`. Untagged carts promote SRAM on
+the first `0x0E` write.
 
-Use it for titles that have been walked through. Do not read “v0.10” as a
+Use it for titles that have been walked through. Do not read the version as a
 completeness claim.
 
 ## Snapshot (current)
 
 | Item | State |
 |---|---|
-| Version | `Cargo.toml` 0.10.0 |
+| Version | `Cargo.toml` 0.11.0 |
 | Restore | tag `sacred/sound-working`, branch `checkpoint/sound-working` (`7816e1b`) |
-| `cargo test --bin fairy` | 107 unit tests passed |
+| `cargo test --bin fairy` | unit tests (see `cargo test`) |
 | CI | `rust-toolchain.toml` + `.github/workflows/test.yml` |
 | `faeos/fairy-lantern` | stale — do not edit |
 | Docs | this file + [AGENTS.md](../AGENTS.md) + [SOUND_AUDIT.md](SOUND_AUDIT.md) |
@@ -73,7 +74,7 @@ Affine identity/PD hacks are **off** by default. Fight HP bars work (`a3958ac`).
 | 16 | m4a BIOS HLE guess / fake PCM | **Stubbed** — no IWRAM writes; LC uses ROM mixer |
 | 17 | Waitstates averaged | **Partial** — WS0/1/2 N+S, SRAM WAITCNT; cart data forces next fetch N; prefetch is an 8-halfword stand-in |
 | 18 | VRAM `% 96K` | **Fixed** — 128K window, upper 32K mirrors OBJ |
-| 19 | Unknown save → 64K SRAM | **Fixed** — untagged cart is `SaveType::None` (no SRAM poke) |
+| 19 | Unknown save → 64K SRAM | **Fixed** — untagged is `None` until a `0x0E` write (or a leftover `.sav`) promotes SRAM. Flash/EEPROM still require an SDK string. |
 | 20 | Flash IDs / erase approximate | **Partial** — AMD 80+AA/55+10/30 erase works; IDs follow SDK tag (Sanyo/Macronix/SST/Panasonic). Atmel protocol not implemented (never reported) |
 | 21 | `FAIRY_DMA_TRACE` env on hot path | **Fixed** (`fairy_trace()` OnceLock) |
 | 22 | LC PCs hardcoded in `cpu/mod.rs` | **Partial** — `cfg(debug)` + `FAIRY_DMA_TRACE`; gone from release step |
@@ -117,10 +118,20 @@ Plus (not in the original list):
 - ArcTan / ArcTan2 are the BIOS polynomials; Div-by-0 returns ±1 / num / 1.
 - RegisterRamReset bit7 leaves DISPCNT forced-blank and identity PA/PD (not zeros).
 - Affine BGs honor mosaic; MUL I-cycles follow Rs magnitude.
-- Gamepad / `KEYINPUT` from a host controller — **Deferred**. Keyboard only
-  (`play::poll_keys`). minifb has no pad API. When LC’s campaign gate is done,
-  map gilrs/evdev onto the same 10 bits; keep keys; no analog into KEYINPUT.
-  Notes: [AGENTS.md](../AGENTS.md) § Input.
+- Gamepad / `KEYINPUT` from a host controller — **Done** (Linux `/dev/input/js*`,
+  OR-ed with keyboard). Notes: [AGENTS.md](../AGENTS.md) § Input.
+- BIOS IntrWait forces IME; CHECK_FLAG latched in the IRQ stub, not in `raise`.
+- HLE boot walks SVC/IRQ/SYS stacks (`7FE0` / `7FA0` / `7F00`).
+- SIOCNT start bit completes immediately (bit3) and can raise serial IRQ.
+- ARM `MOV LR, PC` / unshifted `Rm=R15` is PC+8 (not +12). Register-specified
+  shifts stay PC+12. This is the SDK `mov lr,pc / bx rm` interwork veneer;
+  +12 skipped the return site (POWDER walked EWRAM zeros; Anguna smashed SP).
+- BIOS open bus for non-BIOS PC is the last **BIOS** prefetch (0 after HLE
+  reset), not the last ROM halfword. Anguna New Game `LDR [NULL,#0x14]`
+  used to see `0x69596959` and spin.
+- ARM SWI number is bits 16–23 (`EF01xxxx` = SWI 1). Low 8 bits only if
+  16–23 are 0. Samurai Jack's crt0 `SWI 0x010000` was SoftReset-looping.
+- PSG square/noise were `vol*512` (drowned DirectSound and clipped). Now `*32`.
 
 ### Fix waves (same day, historical)
 

@@ -29,6 +29,12 @@ impl Emu {
         cpu.cpsr.thumb = false;
         cpu.cpsr.irq_disable = false;
         cpu.cpsr.fiq_disable = false;
+        // Real BIOS leaves these stacks. Walk the banks so we do not
+        // clobber SP_svc (Cpu starts in SVC with live R13=0).
+        cpu.set_mode(0x13);
+        cpu.r[13] = 0x0300_7FE0;
+        cpu.set_mode(0x12);
+        cpu.r[13] = 0x0300_7FA0;
         cpu.set_mode(0x1F);
         cpu.r[13] = 0x0300_7F00;
         cpu.r13_usr = 0x0300_7F00;
@@ -115,16 +121,22 @@ impl Emu {
                     irq::check(&mut self.cpu, &mut self.bus, c);
                     let if_ = self.bus.read16(0x0400_0202);
                     let ie = self.bus.read16(0x0400_0200);
-                    let bios_flag = self.bus.read16(0x0300_7FF8);
                     let wake = if self.bus.intr_wait_mask != 0 {
-                        // IntrWait: specific IRQ bits (IF or BIOS mirror)
+                        // IntrWait: BIOS check flags only (set by the IRQ stub).
                         let m = self.bus.intr_wait_mask;
-                        (if_ & m) != 0 || (bios_flag & m) != 0
+                        self.bus.irq_check_flags() & m != 0
                     } else {
-                        // Halt: any enabled pending IRQ
+                        // Halt: any enabled pending IRQ (IME not required)
                         (if_ & ie) != 0
                     };
                     if wake {
+                        if self.bus.intr_wait_mask != 0 {
+                            let m = self.bus.intr_wait_mask;
+                            let kept = self.bus.irq_check_flags() & !m;
+                            self.bus.set_irq_check_flags(kept);
+                            self.bus
+                                .write16_raw(0x0400_0208, self.bus.intr_wait_ime);
+                        }
                         self.bus.halt_wait = false;
                         self.bus.intr_wait_mask = 0;
                     }
@@ -194,12 +206,24 @@ impl Emu {
         let mut frames = 0u32;
         let mut guard = 0u64;
         let ai = auto_input.unwrap_or(AutoInput::off());
+        let shot_every: Option<u32> = std::env::var("FAIRY_SHOT_EVERY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0);
         while frames < n {
             if ai.enabled {
                 self.bus.set_keys_pressed(ai.buttons_at(frames));
             }
             if self.step_cycles(64) {
                 frames += 1;
+                if let Some(every) = shot_every {
+                    if frames % every == 0 {
+                        let p = std::env::temp_dir().join(format!("fairy-shot-{frames}.ppm"));
+                        if crate::video::write_ppm(&p, &self.ppu.frame).is_ok() {
+                            eprintln!("  shot f{frames} → {}", p.display());
+                        }
+                    }
+                }
                 if frames % 25 == 0 && std::env::var_os("FAIRY_MIX_STAT").is_some() {
                     dump_mix_stat(&self.bus, frames);
                 }
@@ -237,6 +261,61 @@ impl Emu {
         }
         self.flush_battery();
         frames
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cart::Cart;
+
+    fn tiny() -> Cart {
+        Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        }
+    }
+
+    #[test]
+    fn hle_boot_matches_bios_stacks() {
+        let emu = Emu::new(&tiny(), None);
+        assert_eq!(emu.cpu.r[13], 0x0300_7F00, "SYS SP");
+        assert_eq!(emu.cpu.r13_irq, 0x0300_7FA0, "IRQ SP");
+        assert_eq!(emu.cpu.r13_svc, 0x0300_7FE0, "SVC SP");
+        assert_eq!(emu.cpu.cpsr.mode & 0x1F, 0x1F);
+        assert!(!emu.cpu.cpsr.irq_disable);
+    }
+
+    #[test]
+    fn intr_wait_wakes_after_taken_vblank() {
+        let mut emu = Emu::new(&tiny(), None);
+        emu.bus.write32(0x0300_7FFC, 0x0800_0100);
+        emu.bus.write16(0x0400_0200, crate::irq::IRQ_VBLANK);
+        emu.bus.write16(0x0400_0208, 0);
+        emu.cpu.r[0] = 1;
+        emu.cpu.r[1] = 1;
+        crate::bios_hle::swi_arm(&mut emu.cpu, &mut emu.bus, 0x0005_0000);
+        assert!(emu.bus.halt_wait);
+        crate::irq::raise(&mut emu.bus, crate::irq::IRQ_VBLANK);
+        // IntrWait must not wake on raw IF — only after the IRQ stub latches.
+        emu.step_cycles(64);
+        assert!(
+            emu.bus.halt_wait || emu.bus.irq_check_flags() & 1 != 0 || emu.cpu.cpsr.mode == 0x12,
+            "vblank pending should enter IRQ or have latched flags"
+        );
+        // Finish the IRQ + IntrWait wake
+        for _ in 0..8 {
+            emu.step_cycles(64);
+            if !emu.bus.halt_wait {
+                break;
+            }
+        }
+        assert!(!emu.bus.halt_wait, "IntrWait returns after taken VBlank");
+        assert_eq!(emu.bus.irq_check_flags() & 1, 0, "latched bit consumed");
     }
 }
 
@@ -407,8 +486,20 @@ impl AutoInput {
         const RIGHT: u16 = 1 << 4;
         const DOWN: u16 = 1 << 7;
 
+        // FAIRY_AUTO_FROM=N starts pulses at frame N (default 2500, LC title).
+        // FAIRY_AUTO=a pulses A from that frame (Anguna New Game / dialogue).
+        let from: u32 = std::env::var("FAIRY_AUTO_FROM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2500);
+        if std::env::var("FAIRY_AUTO").ok().as_deref() == Some("a") {
+            if frame < from {
+                return 0;
+            }
+            return if (frame - from) % 40 < 5 { A } else { 0 };
+        }
         // Before title is ready
-        if frame < 2500 {
+        if frame < from {
             return 0;
         }
         // Title: a few Start presses

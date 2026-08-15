@@ -9,7 +9,7 @@ Rust: own ARM7TDMI core, bus, PPU, and sound path. No mGBA, no libretro cores.
 
 ## Status
 
-v0.10.0 — Pokémon Liquid Crystal (BPRE) boots, plays intro/title music, can
+v0.11.0 — Pokémon Liquid Crystal (BPRE) boots, plays intro/title music, can
 **save in-game (FLASH 128K)**, and can fight (HP/EXP HUD). DirectSound FIFOs
 A+B are mixed as the game programs them; host is 32768 Hz PWM → 48 kHz stereo.
 
@@ -32,10 +32,11 @@ fairy play game.gba
 | Q / E | L / R |
 | Enter / RightShift | Start / Select |
 | P / F5 / F7 / F8 / Esc | Pause / savestate+shot+dbg / load / OAM dump / quit |
+| C / V · pad X / Y | Turbo on-off / cycle 2×–4× |
+| pad L2 / R2 | Savestate save / load (same slot as F5 / F7) |
 
-Input is **keyboard only**. Gamepads are a later commercial goal (same 10-bit
-`KEYINPUT` mask; see [AGENTS.md](AGENTS.md) § Input). Do not start that work
-until the LC play-through gate is done.
+Input is keyboard plus an optional Linux joystick (`/dev/input/js*`), both
+OR-ed into the same 10-bit `KEYINPUT` mask. See [AGENTS.md](AGENTS.md) § Input.
 
 ROMs are user-supplied only (`.gba` / `.zip` containing a `.gba`).
 
@@ -59,7 +60,7 @@ ROMs are user-supplied only (`.gba` / `.zip` containing a `.gba`).
 - PPU Mode 0–5, priority composite, alpha + brightness, WIN0/1 + OBJ window,
   mosaic BG/OBJ, affine OBJ
 - FLASH1M / FLASH / SRAM battery + savestates (`FAELST05`) + EEPROM bit-bang;
-  untagged carts do not invent SRAM
+  untagged carts stay `None` until the first `0x0E` write (then SRAM 64K)
 - Keypad IRQ (KEYCNT), cartridge GPIO RTC (SIIRTC), GBA frame pacing (~59.73 Hz)
 - Sequential vs N-cycle ROM fetch waitstates; data waitstates on LDR/STR;
   open-bus on unmapped reads and unused/write-only IO; HALTCNT Halt;

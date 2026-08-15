@@ -1,0 +1,4 @@
+# Battletron / fake Xbox 360 (045e:028e) — keep the node in group input.
+# Install: sudo cp scripts/99-fairy-pad.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+SUBSYSTEM=="input", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="028e", MODE="0660", GROUP="input"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="028e", MODE="0660", GROUP="input"

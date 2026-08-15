@@ -656,6 +656,29 @@ mod tests {
     }
 
     #[test]
+    fn mov_lr_pc_is_plus_8_not_plus_12() {
+        // AL MOV LR, PC  at 08000000 → LR = 08000008 (interwork return).
+        let cart = cart_with(&[0xE1A0_E00F]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[14], 0x0800_0008, "MOV LR,PC is PC+8");
+        assert_eq!(cpu.unknown_ops, 0);
+    }
+
+    #[test]
+    fn add_rd_pc_unshifted_is_plus_8() {
+        // AL MOV R0, PC
+        let cart = cart_with(&[0xE1A0_000F]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        cpu.set_pc(0x0800_0000);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.r[0], 0x0800_0008);
+    }
+
+    #[test]
     fn strb_reg_offset_uses_rm_not_imm() {
         // STRB r0, [r5, r6]  — must write r5+r6, not r5+(r6 as rotated imm8).
         // m4a reverb is this encoding with r6 = PCM_DMA_BUF_SIZE (1584).
@@ -840,6 +863,25 @@ mod tests {
         cpu.set_pc(0x0300_0000);
         cpu.step(&mut bus);
         assert_eq!(cpu.r[0], 0x3400_0012, "Thumb unaligned LDRH is 32-bit ROR 8");
+    }
+
+    #[test]
+    fn thumb_pop_pc_stays_thumb_on_even_address() {
+        // ARMv4T: POP {PC} ignores bit 0. ARM9 would enter ARM here.
+        let mut mem = vec![0u8; 0x100];
+        mem[0..2].copy_from_slice(&0xBD00u16.to_le_bytes()); // POP {PC}
+        let cart = cart_with(&[]);
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(&cart, None);
+        bus.iwram[..mem.len()].copy_from_slice(&mem);
+        bus.write32(0x0300_0010, 0x0800_0CC0); // even — Thumb code, not ARM
+        cpu.cpsr.thumb = true;
+        cpu.r[13] = 0x0300_0010;
+        cpu.set_pc(0x0300_0000);
+        cpu.step(&mut bus);
+        assert!(cpu.cpsr.thumb, "GBA POP {{PC}} must not drop to ARM");
+        assert_eq!(cpu.r[15], 0x0800_0CC0);
+        assert_eq!(cpu.r[13], 0x0300_0014);
     }
 
     #[test]

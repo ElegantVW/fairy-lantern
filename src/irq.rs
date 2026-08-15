@@ -10,6 +10,7 @@ pub const IRQ_TIMER0: u16 = 1 << 3;
 pub const IRQ_TIMER1: u16 = 1 << 4;
 pub const IRQ_TIMER2: u16 = 1 << 5;
 pub const IRQ_TIMER3: u16 = 1 << 6;
+pub const IRQ_SERIAL: u16 = 1 << 7;
 pub const IRQ_DMA0: u16 = 1 << 8;
 pub const IRQ_DMA1: u16 = 1 << 9;
 pub const IRQ_DMA2: u16 = 1 << 10;
@@ -17,18 +18,13 @@ pub const IRQ_DMA3: u16 = 1 << 11;
 pub const IRQ_KEYPAD: u16 = 1 << 12;
 
 /// Raise a hardware IRQ source (sets IF bit).
+///
+/// The BIOS check flags at `0x03007FF8` are **not** updated here. Real
+/// hardware only latches them in the BIOS IRQ stub once the exception is
+/// taken (`enter_irq`). IntrWait polls that mirror, not raw IF.
 pub fn raise(bus: &mut Bus, bit: u16) {
     let if_ = bus.read16(0x0400_0202) | bit;
     bus.write16_raw(0x0400_0202, if_);
-    // HLE BIOS IntrWait mirror (real BIOS latches checked IRQs at 0x03007FF8)
-    let idx = 0x7FF8usize;
-    if idx + 1 < bus.iwram.len() {
-        let cur = u16::from_le_bytes([bus.iwram[idx], bus.iwram[idx + 1]]);
-        let n = cur | bit;
-        let b = n.to_le_bytes();
-        bus.iwram[idx] = b[0];
-        bus.iwram[idx + 1] = b[1];
-    }
 }
 
 /// After each CPU / Halt slice: if pending and enabled, enter IRQ.
@@ -80,7 +76,17 @@ fn enter_irq(cpu: &mut Cpu, bus: &mut Bus) {
     if bus.hle_bios {
         // Mimic GBA BIOS IRQ stub:
         //   stmfd sp!, {r0-r3, r12, lr}
-        //   ldr r0, =handler ; bx via load from 0x03007FFC
+        //   occurred = IE & IF
+        //   [03007FF8h] |= occurred   (IntrWait / VBlankIntrWait)
+        //   ldr r0, =handler ; bx via 0x03007FFC
+        //
+        // We do **not** ack IF here. Real BIOS does; many ROM handlers still
+        // read IF themselves (libgba, m4a). OR-ing the check flags is the
+        // contract IntrWait needs. Leaving IF lets those handlers see the bits.
+        let ie = bus.read16(0x0400_0200);
+        let if_ = bus.read16(0x0400_0202);
+        bus.or_irq_check_flags(ie & if_);
+
         let mut sp = cpu.r[13].wrapping_sub(6 * 4);
         cpu.r[13] = sp;
         let push = [
@@ -202,5 +208,22 @@ mod tests {
         check(&mut cpu, &mut bus, 1);
         assert_eq!(cpu.cpsr.mode & 0x1F, 0x1F);
         assert_eq!(bus.irq_countdown, 0);
+    }
+
+    #[test]
+    fn raise_does_not_touch_check_flags() {
+        let (_cpu, mut bus) = harness();
+        raise(&mut bus, IRQ_VBLANK);
+        assert_eq!(bus.irq_check_flags(), 0, "IF raise is not the BIOS latch");
+        assert_eq!(bus.read16(0x0400_0202) & IRQ_VBLANK, IRQ_VBLANK);
+    }
+
+    #[test]
+    fn irq_stub_latches_check_flags() {
+        let (mut cpu, mut bus) = harness();
+        raise(&mut bus, IRQ_VBLANK);
+        check(&mut cpu, &mut bus, 64);
+        assert_eq!(bus.irq_check_flags() & IRQ_VBLANK, IRQ_VBLANK);
+        assert_eq!(cpu.r[13], 0x0300_7FA0 - 24, "BIOS SP_irq frame");
     }
 }

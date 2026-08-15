@@ -461,9 +461,9 @@ fn square_tick(ch: &mut SquareCh, rate: u32) -> i16 {
     let step = ((ch.phase >> 16) & 7) as usize;
     let hi = DUTY[ch.duty as usize & 3][step];
     if hi != 0 {
-        (ch.volume as i16) * 512
+        (ch.volume as i16) * 32
     } else {
-        -((ch.volume as i16) * 512)
+        -((ch.volume as i16) * 32)
     }
 }
 
@@ -486,7 +486,7 @@ fn wave_tick(ch: &mut WaveCh) -> i16 {
         3 => 2,
         _ => 4,
     };
-    (nibble as i16 - 8) << (9 - shift)
+    (nibble as i16 - 8) << (5 - shift)
 }
 
 fn noise_tick(ch: &mut NoiseCh, rate: u32) -> i16 {
@@ -511,9 +511,9 @@ fn noise_tick(ch: &mut NoiseCh, rate: u32) -> i16 {
     }
     let hi = ch.lfsr & 1;
     if hi != 0 {
-        (ch.volume as i16) * 512
+        (ch.volume as i16) * 32
     } else {
-        -((ch.volume as i16) * 512)
+        -((ch.volume as i16) * 32)
     }
 }
 

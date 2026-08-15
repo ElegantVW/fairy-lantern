@@ -54,6 +54,9 @@ pub struct Sound {
     pub stream_rate: u32,
     pub samples_out: u64,
     pub samples_from_fifo: u64,
+    /// When false, mix still runs (FIFO DMA stays honest) but samples
+    /// are not pushed to the host ring — turbo / frameskip.
+    emit_host: bool,
 }
 
 impl Default for Sound {
@@ -75,7 +78,12 @@ impl Sound {
             stream_rate: 32768,
             samples_out: 0,
             samples_from_fifo: 0,
+            emit_host: true,
         }
+    }
+
+    pub fn set_emit_host(&mut self, on: bool) {
+        self.emit_host = on;
     }
 
     pub fn samples_from_psg(&self) -> u64 {
@@ -346,7 +354,9 @@ impl Sound {
 
         if !batch.is_empty() {
             self.capture.push_batch(&batch);
-            self.ring.push_batch(&batch);
+            if self.emit_host {
+                self.ring.push_batch(&batch);
+            }
         }
     }
 }

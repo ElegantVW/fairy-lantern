@@ -3,10 +3,14 @@
 use crate::bus::Bus;
 use crate::cpu::Cpu;
 
-/// ARM SWI: GBA BIOS uses the low 8 bits of the 24-bit comment field.
+/// ARM SWI: GBA BIOS reads the comment from bits 16–23 (`EF01xxxx` = SWI 1).
+/// Homebrew that puts the number in bits 0–7 still works when 16–23 are 0
+/// (except SWI 0 SoftReset, which is 0 either way).
 pub fn swi_arm(cpu: &mut Cpu, bus: &mut Bus, op: u32) {
     enter_svc(cpu);
-    dispatch(cpu, bus, (op & 0xFF) as u8);
+    let hi = ((op >> 16) & 0xFF) as u8;
+    let lo = (op & 0xFF) as u8;
+    dispatch(cpu, bus, if hi != 0 { hi } else { lo });
     leave_svc(cpu);
 }
 
@@ -141,7 +145,16 @@ fn isqrt_u32(n: u32) -> u32 {
 
 fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
     // GBATEK: read 03007FFA first (it lives inside the 200h wipe).
+    // Official BIOS also writes IME=0 before the wipe (strb r0, [0x4000208]).
     let flag = bus.read8(0x0300_7FFA);
+    let caller = cpu.r[14];
+    let ime = bus.read16(0x0400_0208) & 1;
+    let ie = bus.read16(0x0400_0200);
+    let if_ = bus.read16(0x0400_0202);
+    let handler = bus.read32(0x0300_7FFC);
+    bus.write16_raw(0x0400_0208, 0);
+    bus.irq_countdown = 0;
+    bus.clear_last_bios();
     for i in 0x7E00..0x8000 {
         if i < bus.iwram.len() {
             bus.iwram[i] = 0;
@@ -149,6 +162,17 @@ fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
     }
     bus.halt_wait = false;
     bus.intr_wait_mask = 0;
+    bus.intr_wait_ime = 0;
+    {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        if n < 16 {
+            eprintln!(
+                "SoftReset #{n} caller={caller:08X} flag={flag:02X} IME={ime} IE={ie:04X} IF={if_:04X} handler={handler:08X}"
+            );
+        }
+    }
     for r in cpu.r.iter_mut().take(13) {
         *r = 0;
     }
@@ -164,20 +188,35 @@ fn soft_reset(cpu: &mut Cpu, bus: &mut Bus) {
     cpu.r[14] = 0;
     cpu.set_mode(0x1F);
     cpu.r[13] = 0x0300_7F00;
-    cpu.r[14] = 0;
-    cpu.cpsr.thumb = false;
-    cpu.cpsr.irq_disable = false;
-    cpu.cpsr.fiq_disable = false;
+    // GBATEK: load the entry into R14 and BX R14. I=1 so a leftover IF
+    // cannot take IRQ before the ROM reinstalls 03007FFC.
     let entry = if flag & 1 != 0 {
         0x0200_0000
     } else {
         0x0800_0000
     };
+    cpu.r[14] = entry;
+    cpu.cpsr.thumb = false;
+    cpu.cpsr.irq_disable = true;
+    cpu.cpsr.fiq_disable = true;
     cpu.set_pc(entry);
 }
 
 fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
     let flags = cpu.r[0];
+    {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        if n < 16 {
+            eprintln!(
+                "RamReset #{n} flags={flags:02X} caller={:08X}",
+                cpu.r[14]
+            );
+        }
+    }
+    // GBATEK: DISPCNT is forced blank regardless of incoming r0.
+    bus.write16_raw(0x0400_0000, 0x0080);
     if flags & 0x01 != 0 {
         bus.ewram.fill(0);
     }
@@ -201,9 +240,12 @@ fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
         zero_io(bus, 0x134, 0x15B);
     }
     if flags & 0x40 != 0 {
-        // Sound
+        // Sound registers + live FIFOs/PSG (zero_io does not touch the mixer).
         zero_io(bus, 0x060, 0x0A8);
         bus.write16_raw(0x0400_0088, 0x0200); // SOUNDBIAS
+        bus.sound.reset_fifo_a();
+        bus.sound.reset_fifo_b();
+        bus.sound.psg_all_off();
     }
     if flags & 0x80 != 0 {
         // All other IO (not CPU regs). Leave KEYINPUT 0x130 — it's the pad latch.
@@ -218,6 +260,8 @@ fn register_ram_reset(cpu: &mut Cpu, bus: &mut Bus) {
         bus.write16_raw(0x0400_0026, 0x0100);
         bus.write16_raw(0x0400_0030, 0x0100);
         bus.write16_raw(0x0400_0036, 0x0100);
+        // zero_io bypasses MMIO handlers — stop the live units it just blanked.
+        bus.stop_dma_and_timers();
     }
 }
 
@@ -230,30 +274,25 @@ fn zero_io(bus: &mut Bus, start: usize, end_incl: usize) {
 }
 
 fn intr_wait(cpu: &mut Cpu, bus: &mut Bus) {
-    // r0: 0 = return if already set, 1 = discard current and wait
-    // r1: interrupt flags to wait for
+    // GBATEK SWI 04h / 05h:
+    //   r0: 0 = return if already set, 1 = discard current and wait
+    //   r1: interrupt flags
+    // Real BIOS forces IME=1, Halt-loops until [03007FF8h] & mask, then
+    // clears those check-flag bits. User IRQ handlers (and our HLE stub)
+    // must latch IF into that mirror — raw IF is not enough.
     let discard = cpu.r[0] != 0;
     let mask = (cpu.r[1] & 0xFFFF) as u16;
     let mask = if mask == 0 { 1 } else { mask }; // default VBlank
+    bus.intr_wait_ime = bus.read16(0x0400_0208) & 1;
+    bus.write16_raw(0x0400_0208, 1);
     if discard {
         let if_ = bus.read16(0x0400_0202);
         bus.write16_raw(0x0400_0202, if_ & !mask);
-        // Clear BIOS IntrWait mirror for those bits
-        let idx = 0x7FF8usize;
-        if idx + 1 < bus.iwram.len() {
-            let cur = u16::from_le_bytes([bus.iwram[idx], bus.iwram[idx + 1]]);
-            let n = cur & !mask;
-            let b = n.to_le_bytes();
-            bus.iwram[idx] = b[0];
-            bus.iwram[idx + 1] = b[1];
-        }
-    } else {
-        // Return immediately if already pending
-        let if_ = bus.read16(0x0400_0202);
-        let bios_flag = bus.read16(0x0300_7FF8);
-        if (if_ & mask) != 0 || (bios_flag & mask) != 0 {
-            return;
-        }
+        let n = bus.irq_check_flags() & !mask;
+        bus.set_irq_check_flags(n);
+    } else if bus.irq_check_flags() & mask != 0 {
+        bus.write16_raw(0x0400_0208, bus.intr_wait_ime);
+        return;
     }
     bus.intr_wait_mask = mask;
     bus.halt_wait = true;
@@ -730,6 +769,39 @@ mod tests {
     }
 
     #[test]
+    fn arm_swi_number_is_bits_16_23() {
+        let (mut cpu, mut bus) = harness();
+        cpu.set_mode(0x1F);
+        cpu.set_pc(0x0800_0100);
+        cpu.r[0] = 0; // RegisterRamReset with no bits: no-op
+        swi_arm(&mut cpu, &mut bus, 0xEF01_0000);
+        assert_eq!(
+            cpu.pc(),
+            0x0800_0100,
+            "EF010000 is SWI 1 (RamReset), not SoftReset to 08000000"
+        );
+        assert_eq!(bus.swi_counts[1], 1);
+        assert_eq!(bus.swi_counts[0], 0);
+    }
+
+    #[test]
+    fn vblank_intr_wait_forces_ime_and_waits_on_check_flags() {
+        let (mut cpu, mut bus) = harness();
+        cpu.set_mode(0x1F);
+        bus.write16(0x0400_0208, 0);
+        bus.write16(0x0400_0202, 1);
+        bus.set_irq_check_flags(1);
+        cpu.r[0] = 1;
+        cpu.r[1] = 1;
+        intr_wait(&mut cpu, &mut bus);
+        assert_eq!(bus.read16(0x0400_0208) & 1, 1, "IME forced on");
+        assert_eq!(bus.irq_check_flags() & 1, 0, "discarded current VBlank");
+        assert!(bus.halt_wait);
+        assert_eq!(bus.intr_wait_mask, 1);
+        assert_eq!(bus.intr_wait_ime, 0, "previous IME remembered");
+    }
+
+    #[test]
     fn sqrt_is_integer_floor() {
         assert_eq!(isqrt_u32(0), 0);
         assert_eq!(isqrt_u32(1), 1);
@@ -798,16 +870,36 @@ mod tests {
     fn soft_reset_honors_ram_boot_flag() {
         let (mut cpu, mut bus) = harness();
         bus.write8(0x0300_7FFA, 1);
+        bus.write16(0x0400_0208, 1);
         cpu.r[0] = 0xDEAD;
         soft_reset(&mut cpu, &mut bus);
         assert_eq!(cpu.pc(), 0x0200_0000);
         assert_eq!(cpu.r[0], 0);
         assert_eq!(cpu.cpsr.mode & 0x1F, 0x1F);
         assert_eq!(cpu.r[13], 0x0300_7F00);
-        assert!(!cpu.cpsr.fiq_disable);
+        assert_eq!(cpu.r[14], 0x0200_0000, "GBATEK BX R14");
+        assert!(cpu.cpsr.irq_disable, "I=1 until the ROM reinstalls IRQ");
+        assert!(cpu.cpsr.fiq_disable);
+        assert_eq!(bus.read16(0x0400_0208) & 1, 0, "BIOS writes IME=0");
         assert_eq!(cpu.r14_irq, 0);
         assert_eq!(cpu.r14_svc, 0);
         assert_eq!(bus.read8(0x0300_7FFA), 0, "flag region is wiped");
+    }
+
+    #[test]
+    fn ram_reset_bit7_stops_live_dma() {
+        let (mut cpu, mut bus) = harness();
+        bus.dma.ch[1].active = true;
+        bus.dma.ch[1].ctrl = 0xB600;
+        bus.dma.ch[1].count = 4;
+        bus.timer_ctrl_prev[0] = 0x80;
+        bus.timer_reload[0] = 0xFBE8;
+        cpu.r[0] = 0x80;
+        register_ram_reset(&mut cpu, &mut bus);
+        assert!(!bus.dma.ch[1].active, "FIFO DMA must not survive RamReset");
+        assert_eq!(bus.dma.ch[1].ctrl, 0);
+        assert_eq!(bus.timer_ctrl_prev[0], 0);
+        assert_eq!(bus.timer_reload[0], 0);
     }
 
     #[test]

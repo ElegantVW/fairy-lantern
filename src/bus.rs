@@ -46,6 +46,9 @@ pub struct Bus {
     pub timer_overflows: [u32; 4],
     /// Last value driven on the data bus (open-bus for unmapped reads).
     last_bus: Cell<u32>,
+    /// Last BIOS prefetch. ROM code reading BIOS sees this, not `last_bus`.
+    /// GBATEK: 00 after reset, before any BIOS fetch (HLE never fetches).
+    last_bios: Cell<u32>,
     /// Cycles the IRQ line has been visibly pending (IME && IE && IF && !I).
     /// Hardware takes the exception ~2 clocks after it becomes true.
     pub irq_countdown: u8,
@@ -57,6 +60,8 @@ pub struct Bus {
     /// BIOS IntrWait / Halt: run until these IF bits appear (or VBlank)
     pub halt_wait: bool,
     pub intr_wait_mask: u16,
+    /// IME to restore when IntrWait wakes (BIOS saves/restores it).
+    pub intr_wait_ime: u16,
     /// True when using HLE BIOS (no real GBA BIOS binary loaded).
     pub hle_bios: bool,
     /// Debug: how many times the CPU entered IRQ.
@@ -111,12 +116,14 @@ impl Bus {
             timer_start_mask: 0,
             timer_overflows: [0; 4],
             last_bus: Cell::new(0),
+            last_bios: Cell::new(0),
             irq_countdown: 0,
             last_fetch: Cell::new(0),
             last_fetch_ok: Cell::new(false),
             prefetch_halfs: Cell::new(0),
             halt_wait: false,
             intr_wait_mask: 0,
+            intr_wait_ime: 1,
             hle_bios,
             irq_count: 0,
             dma: DmaController::new(),
@@ -151,11 +158,24 @@ impl Bus {
 
     /// Attach a .sav path and load battery contents.
     pub fn load_battery(&mut self, sav: PathBuf) {
-        let size = self.save_type.size().max(1);
         if self.save_type == SaveType::None {
+            // A leftover .sav from a previous promote (untagged homebrew).
+            if sav.exists() {
+                if let Ok(data) = std::fs::read(&sav) {
+                    if !data.is_empty() {
+                        self.promote_sram_if_none();
+                        let n = data.len().min(self.sram.len());
+                        self.sram[..n].copy_from_slice(&data[..n]);
+                        self.save_path = Some(sav);
+                        self.save_dirty = false;
+                        return;
+                    }
+                }
+            }
             self.save_path = Some(sav);
             return;
         }
+        let size = self.save_type.size().max(1);
         let data = battery::load_sav(&sav, size);
         match self.save_type {
             SaveType::Flash64 | SaveType::Flash128 => {
@@ -230,11 +250,16 @@ impl Bus {
                 if a >= 0x4000 {
                     return self.open_bus8(a);
                 }
-                // ROM/IWRAM code (and DMA while PC is outside) sees open bus.
-                if self.exec_pc >> 24 == 0 {
-                    self.bios.get(a as usize).copied().unwrap_or(0)
+                // Protected: only BIOS-resident PC may read the image.
+                // Otherwise the last *BIOS* prefetch (0 after reset / HLE).
+                // Using last ROM prefetch here made Anguna's stop-music
+                // (`LDR [NULL, #0x14]`) see 0x69596959 and spin forever.
+                if self.exec_pc < 0x4000 {
+                    let v = self.bios.get(a as usize).copied().unwrap_or(0);
+                    self.note_bios8(a, v);
+                    v
                 } else {
-                    return self.open_bus8(a);
+                    return self.bios_open_bus8(a);
                 }
             }
             0x02 => self.ewram[(a as usize) & (EWRAM_SIZE - 1)],
@@ -314,6 +339,77 @@ impl Bus {
     fn open_bus8(&self, addr: u32) -> u8 {
         let shift = (addr & 3) * 8;
         ((self.last_bus.get() >> shift) & 0xFF) as u8
+    }
+
+    #[inline]
+    fn note_bios8(&self, addr: u32, v: u8) {
+        let shift = (addr & 3) * 8;
+        let cur = self.last_bios.get();
+        let mask = !(0xFFu32 << shift);
+        self.last_bios.set((cur & mask) | ((v as u32) << shift));
+    }
+
+    #[inline]
+    fn bios_open_bus8(&self, addr: u32) -> u8 {
+        let shift = (addr & 3) * 8;
+        ((self.last_bios.get() >> shift) & 0xFF) as u8
+    }
+
+    /// SoftReset: HLE never fetched BIOS, so open-bus is 0 again.
+    pub fn clear_last_bios(&self) {
+        self.last_bios.set(0);
+    }
+
+    /// RegisterRamReset bit7 zeros DMA/timer IO via `zero_io`, which does not
+    /// go through MMIO handlers. Stop the live units or FIFO DMA keeps running
+    /// after a title-screen SoftReset.
+    pub fn stop_dma_and_timers(&mut self) {
+        for ch in &mut self.dma.ch {
+            ch.active = false;
+            ch.ctrl = 0;
+            ch.count = 0;
+        }
+        self.timer_ctrl_prev = [0; 4];
+        self.timer_reload = [0; 4];
+        self.timer_start_mask = 0;
+        self.timer_overflows = [0; 4];
+        self.irq_countdown = 0;
+    }
+
+    /// BIOS IntrWait latch at `03007FF8h` (also visible via the IWRAM mirror).
+    pub fn irq_check_flags(&self) -> u16 {
+        let i = 0x7FF8usize;
+        if i + 1 >= self.iwram.len() {
+            return 0;
+        }
+        u16::from_le_bytes([self.iwram[i], self.iwram[i + 1]])
+    }
+
+    pub fn set_irq_check_flags(&mut self, v: u16) {
+        let i = 0x7FF8usize;
+        if i + 1 >= self.iwram.len() {
+            return;
+        }
+        let b = v.to_le_bytes();
+        self.iwram[i] = b[0];
+        self.iwram[i + 1] = b[1];
+    }
+
+    pub fn or_irq_check_flags(&mut self, bits: u16) {
+        let cur = self.irq_check_flags();
+        self.set_irq_check_flags(cur | bits);
+    }
+
+    /// First SRAM-window write on an untagged cart → 64K SRAM.
+    /// EEPROM/Flash carts carry an SDK string so they never sit on `None`.
+    fn promote_sram_if_none(&mut self) {
+        if self.save_type != SaveType::None {
+            return;
+        }
+        self.save_type = SaveType::Sram(64 * 1024);
+        if self.sram.len() < 64 * 1024 {
+            self.sram.resize(64 * 1024, 0xFF);
+        }
     }
 
     /// Apply timer enable 0→1 reloads latched during MMIO writes.
@@ -474,7 +570,7 @@ impl Bus {
 
     fn write_save(&mut self, addr: u32, val: u8) {
         if self.save_type == SaveType::None {
-            return;
+            self.promote_sram_if_none();
         }
         if let Some(ref mut flash) = self.flash {
             if flash.write(addr, val) {
@@ -637,6 +733,10 @@ impl Bus {
                 return;
             }
             match a {
+                0x0400_0208 => {
+                    self.write16_raw(a, val & 1);
+                    return;
+                }
                 0x0400_0004 => {
                     let cur = self.read16(0x0400_0004);
                     self.write16_raw(a, (val & !7) | (cur & 7));
@@ -821,6 +921,22 @@ impl Bus {
                 }
                 0x0400_00A4 | 0x0400_00A6 => {
                     self.sound.push_fifo_b_half(val);
+                    return;
+                }
+                // SIOCNT — start bit (7) completes immediately so games that
+                // poll transfer-done (bit 3) or the serial IRQ do not hang.
+                0x0400_0128 => {
+                    let mut v = val;
+                    if v & (1 << 7) != 0 {
+                        v &= !(1 << 7);
+                        v |= 1 << 3; // transfer complete
+                        self.write16_raw(a, v);
+                        if v & (1 << 14) != 0 {
+                            crate::irq::raise(self, crate::irq::IRQ_SERIAL);
+                        }
+                    } else {
+                        self.write16_raw(a, v);
+                    }
                     return;
                 }
                 _ => {}
@@ -1224,7 +1340,7 @@ mod tests {
     use crate::cart::Cart;
 
     #[test]
-    fn untagged_cart_ignores_sram_window() {
+    fn untagged_cart_promotes_sram_on_write() {
         let cart = Cart {
             data: vec![0u8; 0x200],
             title: "t".into(),
@@ -1235,9 +1351,29 @@ mod tests {
         };
         let mut bus = Bus::new(&cart, None);
         assert_eq!(bus.save_type, SaveType::None);
+        assert_eq!(bus.read8(0x0E00_0000), 0xFF, "unread window is open/empty");
         bus.write8(0x0E00_0000, 0x42);
-        assert!(!bus.save_dirty, "must not invent a battery");
-        assert_eq!(bus.read8(0x0E00_0000), 0xFF);
+        assert!(bus.save_dirty, "first 0x0E write becomes SRAM");
+        assert!(matches!(bus.save_type, SaveType::Sram(_)));
+        assert_eq!(bus.read8(0x0E00_0000), 0x42);
+    }
+
+    #[test]
+    fn siocnt_start_completes_and_can_irq() {
+        let cart = Cart {
+            data: vec![0u8; 0x200],
+            title: "t".into(),
+            game_code: "T".into(),
+            maker: "00".into(),
+            path: "m".into(),
+            inner_name: None,
+        };
+        let mut bus = Bus::new(&cart, None);
+        bus.write16(0x0400_0128, (1 << 7) | (1 << 14));
+        let v = bus.read16(0x0400_0128);
+        assert_eq!(v & (1 << 7), 0, "start bit clears");
+        assert_eq!(v & (1 << 3), 1 << 3, "transfer complete");
+        assert_eq!(bus.read16(0x0400_0202) & (1 << 7), 1 << 7, "serial IRQ");
     }
 
     #[test]
@@ -1271,6 +1407,12 @@ mod tests {
         let mut bus = Bus::new(&cart, Some(vec![0xEA; BIOS_SIZE]));
         bus.exec_pc = 0x0800_0000;
         assert_eq!(bus.read8(0), 0, "ROM code must not dump BIOS");
+        let _ = bus.read16(0x0800_0000);
+        assert_eq!(
+            bus.read32(0x0000_000C),
+            0,
+            "BIOS open bus is last BIOS fetch (0 after HLE reset), not last ROM halfword"
+        );
         bus.exec_pc = 0x0000_0138;
         assert_eq!(bus.read8(0), 0xEA, "BIOS code can read the image");
         bus.write32(0x0300_0000, 0xA1B2_C3D4);
@@ -1434,12 +1576,13 @@ mod tests {
         let mut bus = Bus::new(&cart, Some(vec![0xEA; BIOS_SIZE]));
         bus.exec_pc = 0x0800_0000;
         assert_eq!(bus.read16(0x0800_0000), 0x7801);
-        // Thumb prefetch open bus: 7801_7801. Lane of 0000003E is byte2 = 01.
-        assert_eq!(bus.read8(0x0000_003C), 0x01);
-        assert_eq!(bus.read8(0x0000_003D), 0x78);
-        assert_eq!(bus.read8(0x0000_003E), 0x01);
-        assert_eq!(bus.read8(0x0000_003F), 0x78);
-        assert_eq!(bus.read32(0x0000_000C), 0x7801_7801);
+        // Unused 00004000+ is last-bus (not BIOS). Thumb latch is 7801_7801.
+        assert_eq!(bus.read8(0x0000_4000), 0x01);
+        assert_eq!(bus.read8(0x0000_4001), 0x78);
+        assert_eq!(bus.read8(0x0000_4002), 0x01);
+        assert_eq!(bus.read8(0x0000_4003), 0x78);
+        assert_eq!(bus.read32(0x0000_4000), 0x7801_7801);
+        assert_eq!(bus.read32(0x0000_000C), 0, "BIOS itself stays last-BIOS (0)");
     }
 
     #[test]
@@ -1448,13 +1591,13 @@ mod tests {
         bus.write32(0x0300_0000, 0xA1B2_C3D4);
         let _ = bus.read16(0x0300_0002);
         assert_eq!(
-            bus.read8(0x0000_0000),
+            bus.read8(0x0000_4000),
             0xD4,
             "IWRAM is a 32-bit bus: unused read sees the whole word"
         );
-        assert_eq!(bus.read8(0x0000_0001), 0xC3);
-        assert_eq!(bus.read8(0x0000_0002), 0xB2);
-        assert_eq!(bus.read8(0x0000_0003), 0xA1);
+        assert_eq!(bus.read8(0x0000_4001), 0xC3);
+        assert_eq!(bus.read8(0x0000_4002), 0xB2);
+        assert_eq!(bus.read8(0x0000_4003), 0xA1);
     }
 
     #[test]
@@ -1462,10 +1605,10 @@ mod tests {
         let mut bus = tiny_bus();
         bus.write16(0x0600_0000, 0x1F3F);
         let _ = bus.read16(0x0600_0000);
-        assert_eq!(bus.read8(0x0000_0000), 0x3F);
-        assert_eq!(bus.read8(0x0000_0001), 0x1F);
-        assert_eq!(bus.read8(0x0000_0002), 0x3F);
-        assert_eq!(bus.read8(0x0000_0003), 0x1F);
+        assert_eq!(bus.read8(0x0000_4000), 0x3F);
+        assert_eq!(bus.read8(0x0000_4001), 0x1F);
+        assert_eq!(bus.read8(0x0000_4002), 0x3F);
+        assert_eq!(bus.read8(0x0000_4003), 0x1F);
     }
 
     #[test]

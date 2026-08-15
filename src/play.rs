@@ -45,6 +45,7 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
 
     // DirectSound → speakers (bare `fairy` TUI and `fairy play` both use this path)
     emu.bus.sound.start_host();
+    let mut pad = crate::pad::Pad::open();
     if emu.bus.rtc.present {
         eprintln!("  clock: cartridge RTC present ({})", emu.bus.rtc.clock_string());
     } else {
@@ -53,10 +54,18 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
 
     println!("✦ Fairy Lantern lit — {title}");
     println!("  arrows/WASD move · Z/Space=A · X=B · Enter=Start · P pause · Esc snuff");
-    println!("  F5 savestate+shot+dbg · F7 loadstate · F8 OAM dump · battery autosaves to .sav · audio+clock on");
+    println!("  pad: {} (keyboard still ORs · FAIRY_PAD=nintendo|xbox)", pad.describe());
+    println!("  turbo: C / pad X on-off · V / pad Y cycle 2× 3× 4× (audio mutes while on)");
+    println!("  F5 / pad L2 savestate+shot+dbg · F7 / pad R2 load · F8 OAM dump · battery .sav");
     println!("  audio: DirectSound A+B (mp2k L/R)  ·  FAIRY_DS=a|b  ·  FAIRY_AUDIO=sine fairy  → beep");
 
     let mut next_frame = Instant::now();
+    let mut turbo_on = false;
+    let mut turbo_mult = 2u32;
+    let mut prev_west = false;
+    let mut prev_north = false;
+    let mut prev_l2 = false;
+    let mut prev_r2 = false;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         if window.is_key_pressed(Key::P, KeyRepeat::No) {
             paused = !paused;
@@ -68,46 +77,8 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             next_frame = Instant::now();
         }
 
-        // Savestate
-        if window.is_key_pressed(Key::F5, KeyRepeat::No) {
-            if let Some(path) = emu.state_path() {
-                match savestate::save(emu, &path) {
-                    Ok(()) => {
-                        let shot = crate::video::shot_path_for_state(&path);
-                        let dbg = crate::statedbg::dbg_path_for_state(&path);
-                        status = format!(
-                            "state saved → {} + {} + {}",
-                            path.display(),
-                            shot.display(),
-                            dbg.display()
-                        );
-                        eprintln!("  {status}");
-                    }
-                    Err(e) => {
-                        status = format!("state save failed: {e}");
-                        eprintln!("  {status}");
-                    }
-                }
-            } else {
-                status = "no savestate for built-in fable".into();
-            }
-        }
-        if window.is_key_pressed(Key::F7, KeyRepeat::No) {
-            if let Some(path) = emu.state_path() {
-                match savestate::load(emu, &path) {
-                    Ok(()) => {
-                        status = format!("state loaded ← {}", path.display());
-                        eprintln!("  {status}");
-                    }
-                    Err(e) => {
-                        status = format!("state load failed: {e}");
-                        eprintln!("  {status}");
-                    }
-                }
-            } else {
-                status = "no savestate path".into();
-            }
-        }
+        // Savestate (F5 / L2 save · F7 / R2 load) — handled after pad.poll so
+        // trigger edges are fresh. Keyboard F5/F7 stay.
         if window.is_key_pressed(Key::F8, KeyRepeat::No) {
             crate::emu::dump_oam_stat(&emu.bus, frame_n as u32);
             let ppm = std::env::temp_dir().join("fairy-lantern-oam.ppm");
@@ -120,25 +91,70 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             }
         }
 
-        let keys = poll_keys(&window);
+        let keys = poll_keys(&window) | pad.poll();
         emu.bus.set_keys_pressed(keys);
 
+        let (west, north) = pad.host_xy();
+        let (l2, r2) = pad.host_triggers();
+        let toggle = window.is_key_pressed(Key::C, KeyRepeat::No) || (west && !prev_west);
+        let cycle = window.is_key_pressed(Key::V, KeyRepeat::No) || (north && !prev_north);
+        let do_save = window.is_key_pressed(Key::F5, KeyRepeat::No) || (l2 && !prev_l2);
+        let do_load = window.is_key_pressed(Key::F7, KeyRepeat::No) || (r2 && !prev_r2);
+        prev_west = west;
+        prev_north = north;
+        prev_l2 = l2;
+        prev_r2 = r2;
+        if do_save {
+            status = save_slot(emu);
+            eprintln!("  {status}");
+        }
+        if do_load {
+            status = load_slot(emu);
+            eprintln!("  {status}");
+        }
+        if toggle {
+            turbo_on = !turbo_on;
+            emu.bus.sound.set_emit_host(!turbo_on);
+            next_frame = Instant::now();
+            status = if turbo_on {
+                format!("turbo {turbo_mult}×")
+            } else {
+                "turbo off".into()
+            };
+            eprintln!("  {status}");
+        }
+        if cycle {
+            turbo_mult = next_turbo_mult(turbo_mult);
+            status = if turbo_on {
+                format!("turbo {turbo_mult}×")
+            } else {
+                format!("turbo {turbo_mult}× (off)")
+            };
+            eprintln!("  {status}");
+        }
+
         if !paused {
-            // One video frame per present. A hitch used to chase wall-clock
+            // One video frame per present at 1×. Turbo runs N GBA frames
+            // then presents the last. A hitch used to chase wall-clock
             // (up to 6 GBA frames) and never sleep again — that is the
             // "slow and it never came back" report. Extra work only if the
-            // audio ring is actually starving.
-            if !run_frame(emu, &mut frame_n)? {
-                bail!("frame watchdog — CPU stuck (pc=0x{:08X})", emu.cpu.pc());
-            }
-            let extra = audio_catchup_extra(
-                emu.bus.sound.fifo_locked(),
-                emu.bus.sound.ring_frames(),
-                emu.bus.sound.stream_rate,
-            );
-            for _ in 0..extra {
+            // audio ring is actually starving (and turbo is off).
+            let run_n = if turbo_on { turbo_mult } else { 1 };
+            for _ in 0..run_n {
                 if !run_frame(emu, &mut frame_n)? {
                     bail!("frame watchdog — CPU stuck (pc=0x{:08X})", emu.cpu.pc());
+                }
+            }
+            if !turbo_on {
+                let extra = audio_catchup_extra(
+                    emu.bus.sound.fifo_locked(),
+                    emu.bus.sound.ring_frames(),
+                    emu.bus.sound.stream_rate,
+                );
+                for _ in 0..extra {
+                    if !run_frame(emu, &mut frame_n)? {
+                        bail!("frame watchdog — CPU stuck (pc=0x{:08X})", emu.cpu.pc());
+                    }
                 }
             }
         }
@@ -161,13 +177,15 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
         } else {
             String::new()
         };
-        let mix = if std::env::var("FAIRY_AUDIO")
+        let mix = if turbo_on {
+            format!(" · TURBO {turbo_mult}×")
+        } else if std::env::var("FAIRY_AUDIO")
             .map(|v| v.eq_ignore_ascii_case("sine"))
             .unwrap_or(false)
         {
-            " · MIX=SINE"
+            " · MIX=SINE".into()
         } else {
-            " · MIX=AB@32k"
+            " · MIX=AB@32k".into()
         };
         let win_title = if status.is_empty() {
             format!("Fairy Lantern — {title} · {clk} · t={elapsed}s{unk}{mix}")
@@ -182,12 +200,17 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
 
         // Sleep when ahead. After a hitch, drop the debt so the *next*
         // loop can sleep — do not stay 4+ frames late forever.
-        next_frame += frame_budget;
-        let now = Instant::now();
-        if next_frame > now {
-            std::thread::sleep(next_frame - now);
-        } else if now.duration_since(next_frame) > frame_budget * 2 {
-            next_frame = now;
+        // Turbo skips the wait: we already burned N GBA frames this present.
+        if turbo_on {
+            next_frame = Instant::now();
+        } else {
+            next_frame += frame_budget;
+            let now = Instant::now();
+            if next_frame > now {
+                std::thread::sleep(next_frame - now);
+            } else if now.duration_since(next_frame) > frame_budget * 2 {
+                next_frame = now;
+            }
         }
     }
 
@@ -195,6 +218,43 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
     emu.flush_battery();
     println!("  lantern snuffed (battery flushed).");
     Ok(())
+}
+
+fn save_slot(emu: &Emu) -> String {
+    let Some(path) = emu.state_path() else {
+        return "no savestate for built-in fable".into();
+    };
+    match savestate::save(emu, &path) {
+        Ok(()) => {
+            let shot = crate::video::shot_path_for_state(&path);
+            let dbg = crate::statedbg::dbg_path_for_state(&path);
+            format!(
+                "state saved → {} + {} + {}",
+                path.display(),
+                shot.display(),
+                dbg.display()
+            )
+        }
+        Err(e) => format!("state save failed: {e}"),
+    }
+}
+
+fn load_slot(emu: &mut Emu) -> String {
+    let Some(path) = emu.state_path() else {
+        return "no savestate path".into();
+    };
+    match savestate::load(emu, &path) {
+        Ok(()) => format!("state loaded ← {}", path.display()),
+        Err(e) => format!("state load failed: {e}"),
+    }
+}
+
+fn next_turbo_mult(cur: u32) -> u32 {
+    match cur {
+        2 => 3,
+        3 => 4,
+        _ => 2,
+    }
 }
 
 /// At most one extra GBA frame, and only when the host ring has < ~20 ms.
@@ -282,7 +342,7 @@ fn poll_keys(window: &Window) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::audio_catchup_extra;
+    use super::{audio_catchup_extra, next_turbo_mult};
 
     #[test]
     fn no_catchup_when_ring_healthy() {
@@ -297,5 +357,13 @@ mod tests {
     #[test]
     fn none_before_fifo_lock() {
         assert_eq!(audio_catchup_extra(false, 0, 32768), 0);
+    }
+
+    #[test]
+    fn turbo_cycles_2_3_4() {
+        assert_eq!(next_turbo_mult(2), 3);
+        assert_eq!(next_turbo_mult(3), 4);
+        assert_eq!(next_turbo_mult(4), 2);
+        assert_eq!(next_turbo_mult(0), 2);
     }
 }

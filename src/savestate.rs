@@ -332,6 +332,7 @@ pub fn load(emu: &mut Emu, path: &Path) -> Result<()> {
         f.read_exact(&mut hb)?;
         emu.bus.halt_wait = hb[0] != 0;
         emu.bus.intr_wait_mask = read_u16(&mut f)?;
+        emu.bus.intr_wait_ime = 1;
         let mut sm = [0u8; 1];
         f.read_exact(&mut sm)?;
         emu.bus.timer_start_mask = sm[0];

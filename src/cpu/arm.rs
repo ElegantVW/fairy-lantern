@@ -282,12 +282,20 @@ fn barrel_shift(cpu: &Cpu, op: u32, carry_in: bool) -> (u32, bool) {
     }
     // register
     let rm = (op & 0xF) as usize;
+    let shift_imm = (op & (1 << 4)) == 0;
+    // ARM ARM: Rm=R15 is PC+8. Only a *register-specified* shift uses PC+12.
+    // `MOV LR, PC` / `ADD Rd, Rm, PC` (LSL #0) must be +8 — the SDK interwork
+    // veneer is `mov lr, pc; bx rm`. +12 skipped the return site (POWDER).
     let val = if rm == 15 {
-        cpu.pc_arm_read() + 4
+        let pc8 = cpu.pc_arm_read();
+        if shift_imm {
+            pc8
+        } else {
+            pc8.wrapping_add(4)
+        }
     } else {
         cpu.r[rm]
     };
-    let shift_imm = (op & (1 << 4)) == 0;
     let shift_type = (op >> 5) & 3;
     let (amount, _) = if shift_imm {
         (((op >> 7) & 0x1F), false)
@@ -576,8 +584,9 @@ fn addr_mode2_offset(cpu: &Cpu, op: u32) -> u32 {
         return op & 0xFFF;
     }
     let rm = (op & 0xF) as usize;
+    // AM2 Rm is immediate-shifted only; R15 is PC+8 (not +12).
     let val = if rm == 15 {
-        cpu.pc_arm_read().wrapping_add(4)
+        cpu.pc_arm_read()
     } else {
         cpu.r[rm]
     };

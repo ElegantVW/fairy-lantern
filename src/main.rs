@@ -9,6 +9,7 @@ mod dma;
 mod emu;
 mod fable;
 mod irq;
+mod pad;
 mod play;
 mod ppu;
 mod recents;
@@ -114,6 +115,12 @@ enum Commands {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Probe Linux gamepads (evdev / js / USB 360 clones)
+    Pad {
+        /// Print live GBA bits until Ctrl+C
+        #[arg(long)]
+        watch: bool,
+    },
     /// 440 Hz sine — default uses the in-game ring/resampler; --direct is raw 48 kHz
     Tone {
         #[arg(long, default_value_t = 3.0)]
@@ -183,6 +190,9 @@ fn real_main() -> Result<()> {
         }
         Some(Commands::Tui { dir: _ }) => {
             run_home_tui(None)?;
+        }
+        Some(Commands::Pad { watch }) => {
+            crate::pad::probe(watch)?;
         }
         Some(Commands::Tone { seconds, direct }) => {
             if direct {
@@ -397,6 +407,14 @@ fn run_rom(
     if lz_w | lz_v | rl_w | rl_v != 0 {
         println!("  swi: LZ77W={lz_w} LZ77V={lz_v} RLW={rl_w} RLV={rl_v}");
     }
+    println!(
+        "  swi_reset: SoftReset={} RamReset={} Halt={} IntrWait={} VBlankWait={}",
+        emu.bus.swi_counts[0x00],
+        emu.bus.swi_counts[0x01],
+        emu.bus.swi_counts[0x02],
+        emu.bus.swi_counts[0x04],
+        emu.bus.swi_counts[0x05],
+    );
     // Sound BIOS SWI calls
     let init_c = emu.bus.swi_counts[0x1A];
     let main_c = emu.bus.swi_counts[0x1C];
@@ -436,6 +454,7 @@ fn run_rom(
             b.read32(0x0400_0028),
             b.read32(0x0400_002C),
         );
+
         // Active OAM entries
         let mut n_obj = 0u32;
         for i in 0..128 {
@@ -537,11 +556,14 @@ fn diagnose_rom(rom: &PathBuf, max_steps: u64) -> Result<()> {
     emu.attach_rom_path(rom);
     let mut last_valid = emu.cpu.pc();
     let mut invalid_at = None;
+    let mut last_hi = 0xFFFFu32;
+    let verbose = std::env::var_os("FAIRY_DIAG_TRACE").is_some();
     for step in 0..max_steps {
         let pc = emu.cpu.pc();
+        // EWRAM/IWRAM mirrors occupy the whole 02xxxxxx / 03xxxxxx windows.
         let valid = (pc < 0x4000)
-            || (0x0200_0000..0x0204_0000).contains(&pc)
-            || (0x0300_0000..0x0300_8000).contains(&pc)
+            || (0x0200_0000..0x0300_0000).contains(&pc)
+            || (0x0300_0000..0x0400_0000).contains(&pc)
             || (0x0800_0000..0x0E00_0000).contains(&pc);
         if !valid {
             invalid_at = Some((step, pc, last_valid, emu.cpu.r, emu.cpu.cpsr.thumb, emu.bus.dispcnt()));
@@ -560,7 +582,10 @@ fn diagnose_rom(rom: &PathBuf, max_steps: u64) -> Result<()> {
         emu.bus.timer_reload = emu.timers.reload;
         emu.ppu.step(&mut emu.bus, c);
         crate::irq::check(&mut emu.cpu, &mut emu.bus, c);
-        if step < 40 || step >= 70 {
+        let hi = pc >> 16;
+        let sample = verbose || step < 24 || step % 50_000 == 0 || hi != last_hi;
+        last_hi = hi;
+        if sample {
             let op = if emu.cpu.cpsr.thumb {
                 emu.bus.read16(pc) as u32
             } else {

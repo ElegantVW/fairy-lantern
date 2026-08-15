@@ -127,7 +127,10 @@ fn exec(cpu: &mut Cpu, bus: &mut Bus, op: u32) -> u32 {
             if r {
                 let v = bus.read32(sp);
                 sp = sp.wrapping_add(4);
-                cpu.cpsr.thumb = (v & 1) != 0;
+                // ARMv4T / GBA: bit 0 is ignored; stay in Thumb.
+                // ARM9 copies the LSB into T — even LR would drop to ARM
+                // and execute the next Thumb halfwords as a 32-bit op
+                // (FFVA after the Square Enix logo: 08000CC0 = 1C254748).
                 cpu.r[15] = v & !1;
             }
             cpu.r[13] = sp;
