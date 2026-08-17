@@ -56,7 +56,8 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
     println!("  arrows/WASD move · Z/Space=A · X=B · Enter=Start · P pause · Esc snuff");
     println!("  pad: {} (keyboard still ORs · FAIRY_PAD=nintendo|xbox)", pad.describe());
     println!("  turbo: C / pad X on-off · V / pad Y cycle 2× 3× 4× (audio mutes while on)");
-    println!("  F5 / pad L2 savestate+shot+dbg · F7 / pad R2 load · F8 OAM dump · battery .sav");
+    println!("  F5 save · F7 load · F6 load autosave · hold L3 0.6s save · hold R3 0.6s load");
+    println!("  (L2/R2/M2 do not savestate — M2 is the same HID bit as R2)");
     println!("  audio: DirectSound A+B (mp2k L/R)  ·  FAIRY_DS=a|b  ·  FAIRY_AUDIO=sine fairy  → beep");
 
     let mut next_frame = Instant::now();
@@ -64,8 +65,12 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
     let mut turbo_mult = 2u32;
     let mut prev_west = false;
     let mut prev_north = false;
-    let mut prev_l2 = false;
-    let mut prev_r2 = false;
+    let mut l3_since: Option<Instant> = None;
+    let mut r3_since: Option<Instant> = None;
+    let mut l3_fired = false;
+    let mut r3_fired = false;
+    let mut cue: Option<Cue> = None;
+    let mut last_auto = Instant::now();
     while window.is_open() && !window.is_key_down(Key::Escape) {
         if window.is_key_pressed(Key::P, KeyRepeat::No) {
             paused = !paused;
@@ -77,8 +82,6 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             next_frame = Instant::now();
         }
 
-        // Savestate (F5 / L2 save · F7 / R2 load) — handled after pad.poll so
-        // trigger edges are fresh. Keyboard F5/F7 stay.
         if window.is_key_pressed(Key::F8, KeyRepeat::No) {
             crate::emu::dump_oam_stat(&emu.bus, frame_n as u32);
             let ppm = std::env::temp_dir().join("fairy-lantern-oam.ppm");
@@ -95,22 +98,53 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
         emu.bus.set_keys_pressed(keys);
 
         let (west, north) = pad.host_xy();
-        let (l2, r2) = pad.host_triggers();
+        let (l3, r3) = pad.host_sticks();
         let toggle = window.is_key_pressed(Key::C, KeyRepeat::No) || (west && !prev_west);
         let cycle = window.is_key_pressed(Key::V, KeyRepeat::No) || (north && !prev_north);
-        let do_save = window.is_key_pressed(Key::F5, KeyRepeat::No) || (l2 && !prev_l2);
-        let do_load = window.is_key_pressed(Key::F7, KeyRepeat::No) || (r2 && !prev_r2);
         prev_west = west;
         prev_north = north;
-        prev_l2 = l2;
-        prev_r2 = r2;
-        if do_save {
+
+        let now = Instant::now();
+        match hold_progress(l3, &mut l3_since, &mut l3_fired, now) {
+            Hold::Charging(p) => cue = Some(Cue::holding(CueKind::Save, p)),
+            Hold::Fire => {
+                status = save_slot(emu);
+                eprintln!("  {status}");
+                cue = Some(Cue::flash(CueKind::Save, now));
+            }
+            Hold::Idle => {}
+        }
+        match hold_progress(r3, &mut r3_since, &mut r3_fired, now) {
+            Hold::Charging(p) => cue = Some(Cue::holding(CueKind::Load, p)),
+            Hold::Fire => {
+                status = load_slot(emu);
+                eprintln!("  {status}");
+                cue = Some(Cue::flash(CueKind::Load, now));
+            }
+            Hold::Idle => {}
+        }
+        if window.is_key_pressed(Key::F5, KeyRepeat::No) {
             status = save_slot(emu);
             eprintln!("  {status}");
+            cue = Some(Cue::flash(CueKind::Save, now));
         }
-        if do_load {
+        if window.is_key_pressed(Key::F7, KeyRepeat::No) {
             status = load_slot(emu);
             eprintln!("  {status}");
+            cue = Some(Cue::flash(CueKind::Load, now));
+        }
+        if window.is_key_pressed(Key::F6, KeyRepeat::No) {
+            status = load_auto_slot(emu);
+            eprintln!("  {status}");
+            cue = Some(Cue::flash(CueKind::Auto, now));
+        }
+        if now.duration_since(last_auto) >= AUTO_EVERY && !paused {
+            let msg = save_auto_slot(emu);
+            if !msg.starts_with("no savestate") {
+                eprintln!("  autosave {msg}");
+                cue = Some(Cue::flash(CueKind::Auto, now));
+                last_auto = now;
+            }
         }
         if toggle {
             turbo_on = !turbo_on;
@@ -165,6 +199,11 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
             let b = (((p >> 10) & 0x1F) as u32) << 3;
             fb[i] = (r << 16) | (g << 8) | b;
         }
+        if let Some(c) = cue {
+            if !draw_cue(&mut fb, c, Instant::now()) {
+                cue = None;
+            }
+        }
 
         // Title: fable · RTC/clock · status
         let clk = emu.bus.rtc.clock_string();
@@ -185,7 +224,7 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
         {
             " · MIX=SINE".into()
         } else {
-            " · MIX=AB@32k".into()
+            format!(" · MIX=AB@{}", emu.bus.sound.stream_rate)
         };
         let win_title = if status.is_empty() {
             format!("Fairy Lantern — {title} · {clk} · t={elapsed}s{unk}{mix}")
@@ -216,18 +255,172 @@ pub fn run_window(emu: &mut Emu, title: &str) -> Result<()> {
 
     emu.bus.sound.stop_host();
     emu.flush_battery();
+    let msg = save_auto_slot(emu);
+    if !msg.starts_with("no savestate") {
+        eprintln!("  autosave on quit {msg}");
+    }
     println!("  lantern snuffed (battery flushed).");
     Ok(())
 }
 
-fn save_slot(emu: &Emu) -> String {
-    let Some(path) = emu.state_path() else {
-        return "no savestate for built-in fable".into();
+const HOLD_FOR: Duration = Duration::from_millis(600);
+const AUTO_EVERY: Duration = Duration::from_secs(120);
+const CUE_FLASH: Duration = Duration::from_millis(900);
+
+#[derive(Clone, Copy)]
+enum CueKind {
+    Save,
+    Load,
+    Auto,
+}
+
+#[derive(Clone, Copy)]
+struct Cue {
+    kind: CueKind,
+    hold: Option<f32>,
+    flash_at: Option<Instant>,
+}
+
+impl Cue {
+    fn holding(kind: CueKind, p: f32) -> Self {
+        Self {
+            kind,
+            hold: Some(p.clamp(0.0, 1.0)),
+            flash_at: None,
+        }
+    }
+    fn flash(kind: CueKind, now: Instant) -> Self {
+        Self {
+            kind,
+            hold: None,
+            flash_at: Some(now),
+        }
+    }
+}
+
+enum Hold {
+    Idle,
+    Charging(f32),
+    Fire,
+}
+
+fn hold_progress(
+    down: bool,
+    since: &mut Option<Instant>,
+    fired: &mut bool,
+    now: Instant,
+) -> Hold {
+    if !down {
+        *since = None;
+        *fired = false;
+        return Hold::Idle;
+    }
+    let start = *since.get_or_insert(now);
+    let p = now.duration_since(start).as_secs_f32() / HOLD_FOR.as_secs_f32();
+    if p >= 1.0 {
+        if *fired {
+            return Hold::Idle;
+        }
+        *fired = true;
+        Hold::Fire
+    } else {
+        Hold::Charging(p)
+    }
+}
+
+/// Save hue ~320 (hot pink), load ~280 (violet-pink), auto ~350 (warm rose).
+fn cue_rgb(kind: CueKind) -> (u8, u8, u8) {
+    match kind {
+        CueKind::Save => (255, 77, 154),
+        CueKind::Load => (210, 90, 255),
+        CueKind::Auto => (255, 140, 150),
+    }
+}
+
+/// Returns false when the flash has finished (caller may drop the cue).
+fn draw_cue(fb: &mut [u32], cue: Cue, now: Instant) -> bool {
+    let (cr, cg, cb) = cue_rgb(cue.kind);
+    let cx = ppu::WIDTH as i32 / 2;
+    let cy = ppu::HEIGHT as i32 / 2 + 18;
+    if let Some(p) = cue.hold {
+        let r = 20.0;
+        draw_ring(fb, cx, cy, r, 1.6, cr, cg, cb, 220);
+        draw_disk(fb, cx, cy, r * p, cr, cg, cb, 180);
+        // orbiting dots so a still frame still reads as "in progress"
+        let spin = p * std::f32::consts::TAU * 2.0;
+        for i in 0..6 {
+            let a = spin + i as f32 * (std::f32::consts::TAU / 6.0);
+            let dx = (a.cos() * (r + 4.0)).round() as i32;
+            let dy = (a.sin() * (r + 4.0)).round() as i32;
+            draw_disk(fb, cx + dx, cy + dy, 1.8, cr, cg, cb, 255);
+        }
+        return true;
+    }
+    let Some(t0) = cue.flash_at else {
+        return false;
     };
-    match savestate::save(emu, &path) {
+    let t = now.duration_since(t0);
+    if t >= CUE_FLASH {
+        return false;
+    }
+    let u = t.as_secs_f32() / CUE_FLASH.as_secs_f32();
+    let alpha = ((1.0 - u) * 230.0) as u8;
+    let rad = 16.0 + 10.0 * (u * std::f32::consts::PI).sin();
+    draw_disk(fb, cx, cy, rad * 0.72, cr, cg, cb, alpha);
+    draw_ring(fb, cx, cy, rad, 2.2, cr, cg, cb, alpha);
+    true
+}
+
+fn draw_disk(fb: &mut [u32], cx: i32, cy: i32, radius: f32, r: u8, g: u8, b: u8, a: u8) {
+    let rad = radius.max(0.5);
+    let ir = rad.ceil() as i32;
+    let r2 = rad * rad;
+    for dy in -ir..=ir {
+        for dx in -ir..=ir {
+            if (dx * dx + dy * dy) as f32 <= r2 {
+                blend_px(fb, cx + dx, cy + dy, r, g, b, a);
+            }
+        }
+    }
+}
+
+fn draw_ring(fb: &mut [u32], cx: i32, cy: i32, radius: f32, width: f32, r: u8, g: u8, b: u8, a: u8) {
+    let ir = (radius + width).ceil() as i32;
+    let outer = (radius + width) * (radius + width);
+    let inner = (radius - width).max(0.0);
+    let inner = inner * inner;
+    for dy in -ir..=ir {
+        for dx in -ir..=ir {
+            let d2 = (dx * dx + dy * dy) as f32;
+            if d2 <= outer && d2 >= inner {
+                blend_px(fb, cx + dx, cy + dy, r, g, b, a);
+            }
+        }
+    }
+}
+
+fn blend_px(fb: &mut [u32], x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
+    if x < 0 || y < 0 || x >= ppu::WIDTH as i32 || y >= ppu::HEIGHT as i32 {
+        return;
+    }
+    let i = y as usize * ppu::WIDTH + x as usize;
+    let dst = fb[i];
+    let dr = ((dst >> 16) & 0xff) as u32;
+    let dg = ((dst >> 8) & 0xff) as u32;
+    let db = (dst & 0xff) as u32;
+    let aa = a as u32;
+    let ia = 255 - aa;
+    let nr = (r as u32 * aa + dr * ia) / 255;
+    let ng = (g as u32 * aa + dg * ia) / 255;
+    let nb = (b as u32 * aa + db * ia) / 255;
+    fb[i] = (nr << 16) | (ng << 8) | nb;
+}
+
+fn save_to(emu: &Emu, path: &std::path::Path) -> String {
+    match savestate::save(emu, path) {
         Ok(()) => {
-            let shot = crate::video::shot_path_for_state(&path);
-            let dbg = crate::statedbg::dbg_path_for_state(&path);
+            let shot = crate::video::shot_path_for_state(path);
+            let dbg = crate::statedbg::dbg_path_for_state(path);
             format!(
                 "state saved → {} + {} + {}",
                 path.display(),
@@ -239,14 +432,39 @@ fn save_slot(emu: &Emu) -> String {
     }
 }
 
+fn save_slot(emu: &Emu) -> String {
+    let Some(path) = emu.state_path() else {
+        return "no savestate for built-in fable".into();
+    };
+    save_to(emu, &path)
+}
+
+fn save_auto_slot(emu: &Emu) -> String {
+    let Some(path) = emu.auto_state_path() else {
+        return "no savestate for built-in fable".into();
+    };
+    save_to(emu, &path)
+}
+
+fn load_from(emu: &mut Emu, path: &std::path::Path) -> String {
+    match savestate::load(emu, path) {
+        Ok(()) => format!("state loaded ← {}", path.display()),
+        Err(e) => format!("state load failed: {e}"),
+    }
+}
+
 fn load_slot(emu: &mut Emu) -> String {
     let Some(path) = emu.state_path() else {
         return "no savestate path".into();
     };
-    match savestate::load(emu, &path) {
-        Ok(()) => format!("state loaded ← {}", path.display()),
-        Err(e) => format!("state load failed: {e}"),
-    }
+    load_from(emu, &path)
+}
+
+fn load_auto_slot(emu: &mut Emu) -> String {
+    let Some(path) = emu.auto_state_path() else {
+        return "no savestate path".into();
+    };
+    load_from(emu, &path)
 }
 
 fn next_turbo_mult(cur: u32) -> u32 {
@@ -257,13 +475,12 @@ fn next_turbo_mult(cur: u32) -> u32 {
     }
 }
 
-/// At most one extra GBA frame, and only when the host ring has < ~20 ms.
+/// Do not sprint extra GBA frames to feed the speaker. That is the
+/// "crushed by sound" loop: ring looks thin → extra frame → never sleep.
+/// The host resampler stretches a few percent instead.
 fn audio_catchup_extra(fifo_locked: bool, ring_frames: usize, stream_rate: u32) -> u32 {
-    if !fifo_locked {
-        return 0;
-    }
-    let low = (stream_rate.max(8_000) / 50).max(64) as usize;
-    u32::from(ring_frames < low)
+    let _ = (fifo_locked, ring_frames, stream_rate);
+    0
 }
 
 fn run_frame(emu: &mut Emu, frame_n: &mut u64) -> Result<bool> {
@@ -342,7 +559,8 @@ fn poll_keys(window: &Window) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_catchup_extra, next_turbo_mult};
+    use super::{audio_catchup_extra, hold_progress, next_turbo_mult, Hold};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn no_catchup_when_ring_healthy() {
@@ -350,8 +568,9 @@ mod tests {
     }
 
     #[test]
-    fn one_frame_when_starving() {
-        assert_eq!(audio_catchup_extra(true, 10, 32768), 1);
+    fn no_sprint_when_starving() {
+        assert_eq!(audio_catchup_extra(true, 10, 32768), 0);
+        assert_eq!(audio_catchup_extra(true, 10, 13379), 0);
     }
 
     #[test]
@@ -365,5 +584,29 @@ mod tests {
         assert_eq!(next_turbo_mult(3), 4);
         assert_eq!(next_turbo_mult(4), 2);
         assert_eq!(next_turbo_mult(0), 2);
+    }
+
+    #[test]
+    fn hold_fires_once_after_threshold() {
+        let t0 = Instant::now();
+        let mut since = None;
+        let mut fired = false;
+        assert!(matches!(
+            hold_progress(true, &mut since, &mut fired, t0),
+            Hold::Charging(_)
+        ));
+        let t1 = t0 + Duration::from_millis(700);
+        assert!(matches!(
+            hold_progress(true, &mut since, &mut fired, t1),
+            Hold::Fire
+        ));
+        assert!(matches!(
+            hold_progress(true, &mut since, &mut fired, t1 + Duration::from_millis(10)),
+            Hold::Idle
+        ));
+        assert!(matches!(
+            hold_progress(false, &mut since, &mut fired, t1),
+            Hold::Idle
+        ));
     }
 }

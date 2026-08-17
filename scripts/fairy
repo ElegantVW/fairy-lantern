@@ -1,19 +1,33 @@
 #!/usr/bin/env bash
-# fairy — rebuild Fairy Lantern if the tree is newer, then run it.
+# fairy — thin launcher + optional auto-rebuild of the source tree
+# Discovery: FAIRY_BIN → source tree (rebuild if newer) → ~/.local/lib/faeos/fairy
 set -euo pipefail
+
+if [[ -n "${FAIRY_BIN:-}" && -x "${FAIRY_BIN}" ]]; then
+  exec "$FAIRY_BIN" "$@"
+fi
 
 ROOT="${FAIRY_LANTERN_ROOT:-$HOME/fairy-lantern}"
 if [[ ! -d "$ROOT/src" || ! -f "$ROOT/Cargo.toml" ]]; then
-  # script lives in <repo>/scripts/fairy when run from the tree
   here="$(cd "$(dirname "$0")" && pwd)"
   if [[ -d "$here/../src" && -f "$here/../Cargo.toml" ]]; then
     ROOT="$(cd "$here/.." && pwd)"
+  else
+    ROOT=""
   fi
 fi
 
-if [[ ! -f "$ROOT/Cargo.toml" ]]; then
-  echo "fairy: cannot find the fairy-lantern repo (set FAIRY_LANTERN_ROOT)" >&2
-  exit 1
+LIB_BIN="$HOME/.local/lib/faeos/fairy"
+
+# No source tree: use installed engine only
+if [[ -z "$ROOT" || ! -f "$ROOT/Cargo.toml" ]]; then
+  if [[ -x "$LIB_BIN" ]]; then
+    exec "$LIB_BIN" "$@"
+  fi
+  echo "fairy: engine not built yet (no source tree, no ~/.local/lib/faeos/fairy)." >&2
+  echo "  build:  git clone git@github.com:ElegantVW/fairy-lantern.git ~/fairy-lantern" >&2
+  echo "          cd ~/fairy-lantern && ./build.sh install" >&2
+  exit 127
 fi
 
 BIN="$ROOT/target/release/fairy"
@@ -24,7 +38,6 @@ else
   newest="$(find "$ROOT/src" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" \
     -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
   built="$(stat -c '%Y' "$BIN" 2>/dev/null || echo 0)"
-  # newest is epoch.fraction; compare as integers
   newest_i="${newest%.*}"
   if [[ -n "$newest_i" && "$newest_i" -gt "$built" ]]; then
     need=1
@@ -106,7 +119,6 @@ for raw in sys.stdin:
             sys.stderr.flush()
     elif reason == "build-finished":
         ok = bool(msg.get("success"))
-        # Do not exit: cargo still flushes JSON and SIGPIPEs if we close.
 
 if tty:
     sys.stderr.write("\n")
@@ -126,8 +138,6 @@ if [[ "$need" -eq 1 ]]; then
       2>/dev/null || echo 0
   )"
   export FAIRY_CRATE_TOTAL="$crate_total"
-  # nounset + reading PIPESTATUS[1] after a one-element assignment is the crash
-  # the user hit. Copy the whole array in one command; restore flags after.
   set +e
   set +o pipefail
   set +u
@@ -137,7 +147,6 @@ if [[ "$need" -eq 1 ]]; then
   st="${ps[0]:-1}"
   py="${ps[1]:-1}"
   set -euo pipefail
-  # cargo 141 = SIGPIPE if the reader closed early — trust the parser instead
   if [[ "$st" -eq 141 ]]; then
     st="$py"
   fi
@@ -151,9 +160,14 @@ if [[ "$need" -eq 1 ]]; then
   echo "✦ fairy: build ok — starting" >&2
 fi
 
-if [[ ! -x "$BIN" ]]; then
-  echo "fairy: build failed ($BIN missing)" >&2
-  exit 1
+if [[ -x "$BIN" ]]; then
+  exec "$BIN" "$@"
 fi
 
-exec "$BIN" "$@"
+if [[ -x "$LIB_BIN" ]]; then
+  exec "$LIB_BIN" "$@"
+fi
+
+echo "fairy: build failed ($BIN missing)" >&2
+echo "  build:  cd ~/fairy-lantern && ./build.sh install" >&2
+exit 1

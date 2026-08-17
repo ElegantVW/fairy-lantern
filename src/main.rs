@@ -10,6 +10,7 @@ mod emu;
 mod fable;
 mod irq;
 mod pad;
+mod pad_led;
 mod play;
 mod ppu;
 mod recents;
@@ -120,6 +121,15 @@ enum Commands {
         /// Print live GBA bits until Ctrl+C
         #[arg(long)]
         watch: bool,
+        /// Walk Xbox LED + RGB candidate USB reports (watch the pad)
+        #[arg(long)]
+        led: bool,
+        /// Detach xpad before USB OUT (input drops until the probe ends)
+        #[arg(long)]
+        unbind: bool,
+        /// Poll ~/.config/wisp/current.json (no RGB send until a report is proven)
+        #[arg(long)]
+        follow_wisp: bool,
     },
     /// 440 Hz sine — default uses the in-game ring/resampler; --direct is raw 48 kHz
     Tone {
@@ -191,8 +201,19 @@ fn real_main() -> Result<()> {
         Some(Commands::Tui { dir: _ }) => {
             run_home_tui(None)?;
         }
-        Some(Commands::Pad { watch }) => {
-            crate::pad::probe(watch)?;
+        Some(Commands::Pad {
+            watch,
+            led,
+            unbind,
+            follow_wisp,
+        }) => {
+            if led {
+                crate::pad_led::probe_led(unbind)?;
+            } else if follow_wisp {
+                crate::pad_led::follow_wisp()?;
+            } else {
+                crate::pad::probe(watch)?;
+            }
         }
         Some(Commands::Tone { seconds, direct }) => {
             if direct {

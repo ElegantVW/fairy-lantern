@@ -116,6 +116,14 @@ pub fn state_path_for_rom(rom: &Path) -> PathBuf {
     dir.join(format!("{stem}.flst"))
 }
 
+/// Timed backup; never overwritten by a manual F5 / L3 save.
+pub fn auto_state_path_for_rom(rom: &Path) -> PathBuf {
+    let stem = rom.file_stem().and_then(|s| s.to_str()).unwrap_or("fable");
+    let dir = recents::data_dir().join("states");
+    let _ = fs::create_dir_all(&dir);
+    dir.join(format!("{stem}.auto.flst"))
+}
+
 pub fn load_sav(path: &Path, size: usize) -> Vec<u8> {
     let mut buf = vec![0xFF; size.max(1)];
     if size == 0 {

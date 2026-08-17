@@ -142,7 +142,8 @@ impl HostAudio {
         let rate2 = Arc::clone(&game_rate);
 
         // pw-cat first: aplay-on-PipeWire repeats the last period on underrun
-        // (the "it loops" the play window was producing).
+        // (the "it loops" the play window was producing). The pull resampler
+        // holds the last frame; it must not change speed with ring depth.
         let (backend, spawn_fn): (&'static str, fn(u32) -> Option<Child>) = if which("pw-cat") {
             ("pw-cat", spawn_pw_cat)
         } else if which("aplay") {
@@ -254,9 +255,11 @@ fn host_pipe_loop(
 
         let src_rate = game_rate.lock().map(|r| *r).unwrap_or(0);
         // Do not open the device (or invent a rate) until the FIFO timer has
-        // locked AND the ring has ~60 ms of samples. Opening aplay/pw-cat at
+        // locked AND the ring has a fat prebuffer. Opening aplay/pw-cat at
         // boot and starving it made PipeWire loop the last period forever.
-        let prebuffer = (src_rate as usize / 8).max(512); // ~125 ms
+        // ~250 ms. Overworld frames hitch on m4a SoundVSync (every 7
+        // VBlanks). A 125 ms ring went empty and hold-last gated the BGM.
+        let prebuffer = (src_rate as usize / 4).max(1024);
         if child.is_none() {
             if src_rate < 4000 || ring.frames() < prebuffer {
                 thread::sleep(Duration::from_millis(10));

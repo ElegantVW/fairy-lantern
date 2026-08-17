@@ -33,11 +33,7 @@ pub struct Mixer {
     /// Raw FIFO holds at the sample clock (for A/B diagnostics).
     pub trace_a: Vec<i8>,
     pub trace_b: Vec<i8>,
-    lp_l: i32,
-    lp_r: i32,
-    dc_l: i32,
-    dc_r: i32,
-    env: i32,
+    scratch: Vec<i16>,
 }
 
 impl Default for Mixer {
@@ -69,11 +65,7 @@ impl Mixer {
             fifo_locked: false,
             trace_a: Vec::new(),
             trace_b: Vec::new(),
-            lp_l: 0,
-            lp_r: 0,
-            dc_l: 0,
-            dc_r: 0,
-            env: 0,
+            scratch: Vec::with_capacity(64),
         }
     }
 
@@ -95,7 +87,8 @@ impl Mixer {
         timer0_ctrl: u16,
         timer1_ctrl: u16,
         overflows: [u32; 4],
-    ) -> Vec<i16> {
+    ) {
+        self.scratch.clear();
         self.update_rates(regs, timer_reload, timer0_ctrl, timer1_ctrl);
 
         let psg_active = regs.psg_has_signal();
@@ -140,26 +133,15 @@ impl Mixer {
         } else {
             0
         };
-        let ov_out = if clock_a && clock_b {
-            if self.cps_a <= self.cps_b {
-                ov_a
-            } else {
-                ov_b
-            }
-        } else if clock_a {
-            ov_a
-        } else if clock_b {
-            ov_b
-        } else {
-            0
-        };
+        // Emit at the faster FIFO. A slice can report more pops on the
+        // slower timer at start-up; max() does not drop those bytes.
+        let ov_out = ov_a.max(ov_b);
 
         if !self.timer_on_a && !self.timer_on_b && !psg_active {
-            return Vec::new();
+            return;
         }
 
         let master = regs.master_enable();
-        let mut batch = Vec::with_capacity((ov_out as usize + 8).max(8));
 
         // Tick PSG for this slice once; fold into each emitted sample.
         self.cycle_accum_psg += cycles;
@@ -174,42 +156,27 @@ impl Mixer {
             psg_s = 0;
         }
 
-        if ov_out > 0 {
-            let ov_out = ov_out.min(64);
+        // One host sample per FIFO timer tick (~13.4 kHz on BPRE/Emerald).
+        // Advertising 32768 Hz while the interpreter could not feed it
+        // starved pw-cat (silence holes = tremolo) and the play loop
+        // sprinted extra frames to refill (felt "crushed").
+        if ov_out > 0 && (clock_a || clock_b) {
+            let ov_out = ov_out.min(4096);
             for i in 0..ov_out {
                 let pa = ((i + 1) * ov_a) / ov_out - (i * ov_a) / ov_out;
                 let pb = ((i + 1) * ov_b) / ov_out - (i * ov_b) / ov_out;
-                for _ in 0..pa.min(8) {
+                for _ in 0..pa {
                     self.fifo_a.pop_timer();
                 }
-                for _ in 0..pb.min(8) {
+                for _ in 0..pb {
                     self.fifo_b.pop_timer();
                 }
                 if self.trace_a.len() < 300_000 {
-                    self.trace_a.push(if self.fifo_a.hold_valid {
-                        self.fifo_a.hold
-                    } else {
-                        0
-                    });
-                    self.trace_b.push(if self.fifo_b.hold_valid {
-                        self.fifo_b.hold
-                    } else {
-                        0
-                    });
+                    self.trace_a.push(self.fifo_a.hold);
+                    self.trace_b.push(self.fifo_b.hold);
                 }
-            }
-        }
-
-        // GBATEK: hardware resamples everything to 32768 Hz, holding the last
-        // FIFO byte between timer pops. Emitting only at 13.4 kHz and letting
-        // the host lerp it is harsher than the GBA PWM path.
-        if clock_a || clock_b || self.fifo_locked {
-            self.cycle_accum_out = self.cycle_accum_out.saturating_add(cycles);
-            let cps = CPS_PSG;
-            while self.cycle_accum_out >= cps {
-                self.cycle_accum_out -= cps;
-                let (mut l, mut r) = if audio_sine() {
-                    sine_pair(self.samples_out, PSG_BASE_RATE)
+                let (l, r) = if audio_sine() {
+                    sine_pair(self.samples_out, self.stream_rate.max(1))
                 } else {
                     let use_a = en_a && self.fifo_a.hold_valid && ds_want_a();
                     let use_b = en_b && self.fifo_b.hold_valid && ds_want_b();
@@ -223,38 +190,39 @@ impl Mixer {
                         psg_s,
                     )
                 };
-                if !audio_sine() {
-                    l = limit_sample(&mut self.dc_l, &mut self.env, lpf(&mut self.lp_l, l));
-                    r = limit_sample(&mut self.dc_r, &mut self.env, lpf(&mut self.lp_r, r));
-                }
                 let p = l.unsigned_abs().max(r.unsigned_abs()) as i16;
                 if p > self.peak_abs {
                     self.peak_abs = p;
                 }
-                batch.push(l);
-                batch.push(r);
+                self.scratch.push(l);
+                self.scratch.push(r);
                 self.samples_out = self.samples_out.wrapping_add(1);
             }
-            return batch;
+            return;
         }
 
-        // PSG-only: emit at 32768 Hz from the cycle budget.
-        let cps_out = self.cps_out.max(1);
-        let mut left = cycles;
-        while left > 0 {
-            let to_out = cps_out.saturating_sub(self.cycle_accum_out);
-            let step = left.min(to_out).max(1);
-            self.cycle_accum_out += step;
-            left -= step;
-            if self.cycle_accum_out >= cps_out {
-                self.cycle_accum_out -= cps_out;
-                let (l, r) = mix_sample(regs, master, false, 0, false, 0, psg_s);
-                batch.push(l);
-                batch.push(r);
-                self.samples_out = self.samples_out.wrapping_add(1);
+        // PSG-only (no FIFO clock this slice): emit at 32768 Hz.
+        if psg_active && !clock_a && !clock_b {
+            let cps_out = self.cps_out.max(1);
+            let mut left = cycles;
+            while left > 0 {
+                let to_out = cps_out.saturating_sub(self.cycle_accum_out);
+                let step = left.min(to_out).max(1);
+                self.cycle_accum_out += step;
+                left -= step;
+                if self.cycle_accum_out >= cps_out {
+                    self.cycle_accum_out -= cps_out;
+                    let (l, r) = mix_sample(regs, master, false, 0, false, 0, psg_s);
+                    self.scratch.push(l);
+                    self.scratch.push(r);
+                    self.samples_out = self.samples_out.wrapping_add(1);
+                }
             }
         }
-        batch
+    }
+
+    pub fn last_batch(&self) -> &[i16] {
+        &self.scratch
     }
 
     fn update_rates(
@@ -300,18 +268,15 @@ impl Mixer {
             self.fifo_locked = true;
             cps_b
         } else if self.fifo_locked {
-            self.cps_out = CPS_PSG;
-            self.stream_rate = PSG_BASE_RATE;
             return;
         } else if regs.psg_has_signal() {
             CPS_PSG
         } else {
             return;
         };
-        let _ = (rate_a, rate_b, tick);
-        // Output at the hardware PWM rate. FIFO pops stay on the timer.
-        self.cps_out = CPS_PSG;
-        self.stream_rate = PSG_BASE_RATE;
+        let _ = (rate_a, rate_b);
+        self.cps_out = tick;
+        self.stream_rate = (GBA_CLOCK / tick).max(1);
     }
 
     pub fn audio_active(&self) -> bool {
@@ -416,11 +381,29 @@ fn fifo_amp(hold: i8, full: bool) -> i32 {
     }
 }
 
-/// Add SOUNDBIAS (0x200), clip to 10-bit PWM, scale to i16 (mGBA).
+/// Add SOUNDBIAS (0x200), fold dest-both peaks instead of squaring at 10-bit.
 #[inline]
 fn bias_out(sample: i32) -> i16 {
-    let s = (sample + 0x200).clamp(0, 0x3FF);
-    ((s - 0x200) * 48) as i16
+    let s = sample + 0x200;
+    let folded = if s > 0x3FF {
+        0x3FF - (s - 0x3FF) / 4
+    } else if s < 0 {
+        s / 4
+    } else {
+        s
+    };
+    let folded = folded.clamp(0, 0x3FF);
+    ((folded - 0x200) * 40) as i16
+}
+
+/// Slow DC blocker. Hardware / mGBA do not do this on the FIFO mix —
+/// an HPF at the FIFO rate (~8 Hz) pumped dest-both BGM (Rustboro).
+#[cfg(test)]
+#[inline]
+fn dc_block(dc: &mut i32, x: i16) -> i16 {
+    let x = i32::from(x);
+    *dc += (x - *dc) / 256;
+    (x - *dc) as i16
 }
 
 pub fn timer_cps_rate(reload: u16, ctrl: u16) -> (u32, u32, bool) {
@@ -439,20 +422,11 @@ pub fn timer_cps_rate(reload: u16, ctrl: u16) -> (u32, u32, bool) {
     (cyc, r, true)
 }
 
-#[inline]
-fn lpf(state: &mut i32, x: i16) -> i16 {
-    // One-pole ~4 kHz at 13.4 kHz — knocks the 8-bit stair off the rail.
-    *state += (i32::from(x) - *state) / 3;
-    *state as i16
-}
-
-/// Drop DC wander, then pull gain down when the 8-bit mix rides the rail.
-/// LC's B stream RMS climbs until crest ≈ 1.5 (square / clip).
-#[inline]
-fn limit_sample(dc: &mut i32, env: &mut i32, x: i16) -> i16 {
-    let x = i32::from(x);
-    *dc += (x - *dc) / 256;
-    let y = x - *dc;
+/// Old AGC: fast attack / slow release. A footstep peak pulled the
+/// envelope above CEIL and ducked BGM for tens of ms — tremolo.
+#[cfg(test)]
+fn limit_sample_pumps(env: &mut i32, x: i16) -> i16 {
+    let y = i32::from(x);
     let a = y.abs();
     if a > *env {
         *env = a;
@@ -460,24 +434,8 @@ fn limit_sample(dc: &mut i32, env: &mut i32, x: i16) -> i16 {
         *env = (*env * 255) / 256;
     }
     const CEIL: i32 = 10_000;
-    let y = if *env > CEIL {
-        y * CEIL / *env
-    } else {
-        y
-    };
+    let y = if *env > CEIL { y * CEIL / *env } else { y };
     y.clamp(-32767, 32767) as i16
-}
-
-#[inline]
-fn soft_clip(x: i32) -> i16 {
-    let x = x.clamp(-65536, 65536);
-    if x > 31000 {
-        (31000 + (x - 31000) / 6).min(32767) as i16
-    } else if x < -31000 {
-        (-31000 + (x + 31000) / 6).max(-32768) as i16
-    } else {
-        x as i16
-    }
 }
 
 #[cfg(test)]
@@ -526,6 +484,17 @@ mod tests {
     }
 
     #[test]
+    fn agc_ducks_quiet_after_peak() {
+        let mut env = 0i32;
+        let _ = limit_sample_pumps(&mut env, 20_000);
+        let ducked = limit_sample_pumps(&mut env, 4_000);
+        assert!(
+            ducked.abs() < 4_000,
+            "legacy AGC must duck the follow-up ({ducked})"
+        );
+    }
+
+    #[test]
     fn held_sample_stable() {
         let regs = PsgRegs::default();
         let s0 = mix_sample(&regs, true, true, 64, false, 0, 0);
@@ -558,7 +527,8 @@ mod tests {
             mix.fifo_a.push_word(0x1010_1010);
             mix.fifo_b.push_word(0x2020_2020);
         }
-        let out = mix.step(512 * 8, &regs, reload, 0x80, 0x80, [3, 8, 0, 0]);
+        mix.step(512 * 8, &regs, reload, 0x80, 0x80, [3, 8, 0, 0]);
+        let out = mix.last_batch();
         assert!(!out.is_empty());
         assert_eq!(mix.cps_out, 512, "emit at the faster FIFO");
         assert_eq!(mix.stream_rate, GBA_CLOCK / mix.cps_out);
@@ -574,12 +544,13 @@ mod tests {
         regs.sndh = 1 << 8;
         let reload = [(0x10000u32 - 1254) as u16, 0, 0, 0];
         mix.fifo_a.push_word(0x1010_1010);
-        let _ = mix.step(1254 * 4, &regs, reload, 0x80, 0, [4, 0, 0, 0]);
+        mix.step(1254 * 4, &regs, reload, 0x80, 0, [4, 0, 0, 0]);
         assert!(mix.fifo_locked());
         let locked = mix.stream_rate;
-        assert_eq!(locked, PSG_BASE_RATE, "output is the 32768 Hz PWM rate");
+        assert_eq!(locked, GBA_CLOCK / 1254, "output follows the FIFO timer");
+        assert!((13_000..14_000).contains(&locked), "locked={locked}");
         // Timers disabled; PSG master still on — must not bounce to 32768.
-        let _ = mix.step(1254 * 4, &regs, reload, 0, 0, [0, 0, 0, 0]);
+        mix.step(1254 * 4, &regs, reload, 0, 0, [0, 0, 0, 0]);
         assert_eq!(mix.stream_rate, locked);
     }
 
@@ -591,10 +562,11 @@ mod tests {
         regs.sndh = (1 << 8) | (1 << 9) | (1 << 2); // A L+R, full vol
         mix.fifo_a.push_word(u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]));
         let reload = [(0x10000u32 - 512) as u16, 0, 0, 0];
-        let out = mix.step(512 * 4, &regs, reload, 0x80, 0, [4, 0, 0, 0]);
+        mix.step(512 * 4, &regs, reload, 0x80, 0, [4, 0, 0, 0]);
+        let out = mix.last_batch();
         assert_eq!(out.len(), 8);
         let expect = |s: i8| mix_sample(&regs, true, true, s, false, 0, 0).0;
-        // LPF settles toward each PCM byte; must stay ordered and nonzero.
+        // Each FIFO byte must stay ordered and nonzero.
         assert!(out[0] != 0 && out[2] != 0 && out[4] != 0 && out[6] != 0);
         assert!(expect(0x10) != 0);
         assert!(out[6].abs() >= out[0].abs());
@@ -608,17 +580,44 @@ mod tests {
         regs.sndh = (1 << 8) | (1 << 9) | (1 << 2);
         let reload = [(0x10000u32 - 1254) as u16, 0, 0, 0];
         mix.fifo_a.push_word(u32::from_le_bytes([0x10, 0x20, 0x30, 0x40]));
-        // One overflow + 512 cycles → one PCM frame at 32768 Hz.
-        let hit = mix.step(512, &regs, reload, 0x80, 0, [1, 0, 0, 0]);
+        // One overflow → one stereo frame at the FIFO rate.
+        mix.step(512, &regs, reload, 0x80, 0, [1, 0, 0, 0]);
+        let hit = mix.last_batch().to_vec();
         assert_eq!(hit.len(), 2);
         assert_ne!(hit[0], 0, "first FIFO byte must be audible");
-        // Further 32768 ticks with no pop must HOLD, not insert silence.
-        let extra = mix.step(512, &regs, reload, 0x80, 0, [0, 0, 0, 0]);
-        assert_eq!(extra.len(), 2);
-        assert_ne!(extra[0], 0, "held FIFO byte, not a zero");
-        assert_eq!(extra[0].signum(), hit[0].signum());
-        let hit2 = mix.step(512, &regs, reload, 0x80, 0, [1, 0, 0, 0]);
+        // No overflow this slice: emit nothing (host ZOH holds the last frame).
+        mix.step(512, &regs, reload, 0x80, 0, [0, 0, 0, 0]);
+        assert!(
+            mix.last_batch().is_empty(),
+            "do not invent PWM samples between pops"
+        );
+        mix.step(512, &regs, reload, 0x80, 0, [1, 0, 0, 0]);
+        let hit2 = mix.last_batch();
         assert_eq!(hit2.len(), 2);
         assert_ne!(hit2[0], 0);
+    }
+
+    #[test]
+    fn dest_both_soft_folds_instead_of_pwm_rail() {
+        let mut regs = PsgRegs::default();
+        regs.sndx = 0x80;
+        // A+B both speakers at 100% — hardware would square at 10-bit.
+        regs.sndh = (3 << 8) | (3 << 12) | (1 << 2) | (1 << 3);
+        let (l, r) = mix_sample(&regs, true, true, 0x7F, true, 0x7F, 0);
+        assert_eq!(l, r);
+        // Hard 10-bit clip then *40 is 20440. Fold must sit well below that.
+        assert!(l.abs() < 18_000, "dest-both peak should fold, got {l}");
+        assert!(l.abs() > 8_000, "still audible, got {l}");
+    }
+
+    #[test]
+    fn dc_block_does_not_duck_after_peak() {
+        let mut dc = 0i32;
+        let _ = dc_block(&mut dc, 20_000);
+        let follow = dc_block(&mut dc, 4_000);
+        assert!(
+            follow.abs() > 3_500,
+            "DC block must not AGC-duck the next note ({follow})"
+        );
     }
 }

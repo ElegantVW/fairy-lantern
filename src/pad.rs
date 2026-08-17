@@ -49,6 +49,8 @@ const BTN_TR2: u16 = 0x139;
 const BTN_SELECT: u16 = 0x13a;
 const BTN_START: u16 = 0x13b;
 const BTN_MODE: u16 = 0x13c;
+const BTN_THUMBL: u16 = 0x13d;
+const BTN_THUMBR: u16 = 0x13e;
 const ABS_X: u16 = 0;
 const ABS_Y: u16 = 1;
 const ABS_Z: u16 = 2;
@@ -155,10 +157,12 @@ pub struct Pad {
     host_west: bool,
     /// Physical Y (north). Host-only — not a GBA key.
     host_north: bool,
-    /// L2 / LT. Host savestate save.
+    /// L2 / LT — not used for savestate (M2 clones R2 on this pad).
     host_l2: bool,
-    /// R2 / RT. Host savestate load.
     host_r2: bool,
+    /// Stick clicks. Host savestate hold-to-save / hold-to-load.
+    host_l3: bool,
+    host_r3: bool,
 }
 
 impl Pad {
@@ -173,6 +177,8 @@ impl Pad {
             host_north: false,
             host_l2: false,
             host_r2: false,
+            host_l3: false,
+            host_r3: false,
         };
         pad.try_open(true);
         pad
@@ -269,6 +275,8 @@ impl Pad {
                 &mut self.host_north,
                 &mut self.host_l2,
                 &mut self.host_r2,
+                &mut self.host_l3,
+                &mut self.host_r3,
                 self.profile,
             )
             {
@@ -288,6 +296,8 @@ impl Pad {
                 &mut self.host_north,
                 &mut self.host_l2,
                 &mut self.host_r2,
+                &mut self.host_l3,
+                &mut self.host_r3,
                 self.profile,
             ) {
                 Ok(()) => true,
@@ -308,6 +318,8 @@ impl Pad {
             self.host_north = false;
             self.host_l2 = false;
             self.host_r2 = false;
+            self.host_l3 = false;
+            self.host_r3 = false;
             self.last_try = Instant::now();
         }
         self.pressed
@@ -318,9 +330,13 @@ impl Pad {
         (self.host_west, self.host_north)
     }
 
-    /// L2 (save) and R2 (load). Host-only.
     pub fn host_triggers(&self) -> (bool, bool) {
         (self.host_l2, self.host_r2)
+    }
+
+    /// L3 / R3 stick clicks (host savestate hold).
+    pub fn host_sticks(&self) -> (bool, bool) {
+        (self.host_l3, self.host_r3)
     }
 }
 
@@ -571,6 +587,8 @@ fn drain_evdev(
     host_north: &mut bool,
     host_l2: &mut bool,
     host_r2: &mut bool,
+    host_l3: &mut bool,
+    host_r3: &mut bool,
     profile: Profile,
 ) -> io::Result<()> {
     let mut buf = [0u8; 24];
@@ -582,7 +600,7 @@ fn drain_evdev(
                 let value = i32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
                 apply_evdev(
                     pressed, south, east, hat_x, hat_y, stick_x, stick_y, sh_l, sh_r, host_west,
-                    host_north, host_l2, host_r2, profile, typ, code, value,
+                    host_north, host_l2, host_r2, host_l3, host_r3, profile, typ, code, value,
                 );
             }
             Ok(0) => break,
@@ -609,6 +627,8 @@ fn apply_evdev(
     host_north: &mut bool,
     host_l2: &mut bool,
     host_r2: &mut bool,
+    host_l3: &mut bool,
+    host_r3: &mut bool,
     profile: Profile,
     typ: u16,
     code: u16,
@@ -638,6 +658,8 @@ fn apply_evdev(
                 }
                 BTN_TL2 => *host_l2 = down,
                 BTN_TR2 => *host_r2 = down,
+                BTN_THUMBL => *host_l3 = down,
+                BTN_THUMBR => *host_r3 = down,
                 BTN_SELECT => set_bit(pressed, KEY_SELECT, down),
                 BTN_START => set_bit(pressed, KEY_START, down),
                 _ => {}
@@ -763,6 +785,8 @@ fn drain_js(
     host_north: &mut bool,
     host_l2: &mut bool,
     host_r2: &mut bool,
+    host_l3: &mut bool,
+    host_r3: &mut bool,
     profile: Profile,
 ) -> io::Result<()> {
     let mut buf = [0u8; 8];
@@ -775,7 +799,9 @@ fn drain_js(
                     typ: buf[6],
                     number: buf[7],
                 };
-                apply_js(pressed, host_west, host_north, host_l2, host_r2, profile, ev);
+                apply_js(
+                    pressed, host_west, host_north, host_l2, host_r2, host_l3, host_r3, profile, ev,
+                );
             }
             Ok(0) => break,
             Ok(_) => break,
@@ -793,6 +819,8 @@ fn apply_js(
     host_north: &mut bool,
     host_l2: &mut bool,
     host_r2: &mut bool,
+    host_l3: &mut bool,
+    host_r3: &mut bool,
     profile: Profile,
     ev: JsEvent,
 ) {
@@ -830,6 +858,8 @@ fn apply_js(
                 5 => set_bit(pressed, KEY_R, down),
                 6 | 8 => set_bit(pressed, KEY_SELECT, down),
                 7 => set_bit(pressed, KEY_START, down),
+                9 => *host_l3 = down,
+                10 => *host_r3 = down,
                 _ => {}
             }
         }
@@ -957,6 +987,8 @@ mod tests {
             host_north: false,
             host_l2: false,
             host_r2: false,
+            host_l3: false,
+            host_r3: false,
         };
         assert_eq!(p.poll(), 0);
     }
@@ -975,6 +1007,8 @@ mod tests {
         north: bool,
         l2: bool,
         r2: bool,
+        l3: bool,
+        r3: bool,
     }
     impl Tap {
         fn new() -> Self {
@@ -992,6 +1026,8 @@ mod tests {
                 north: false,
                 l2: false,
                 r2: false,
+                l3: false,
+                r3: false,
             }
         }
         fn ev(&mut self, profile: Profile, typ: u16, code: u16, value: i32) {
@@ -1009,6 +1045,8 @@ mod tests {
                 &mut self.north,
                 &mut self.l2,
                 &mut self.r2,
+                &mut self.l3,
+                &mut self.r3,
                 profile,
                 typ,
                 code,
@@ -1035,6 +1073,15 @@ mod tests {
         assert!(t.l2 && t.r2);
         t.ev(Profile::Nintendo, EV_KEY, BTN_TL, 1);
         assert_eq!(t.p & KEY_L, KEY_L, "digital L still GBA L");
+    }
+
+    #[test]
+    fn stick_clicks_are_host_only() {
+        let mut t = Tap::new();
+        t.ev(Profile::Nintendo, EV_KEY, BTN_THUMBL, 1);
+        t.ev(Profile::Nintendo, EV_KEY, BTN_THUMBR, 1);
+        assert_eq!(t.p, 0);
+        assert!(t.l3 && t.r3);
     }
 
     #[test]
@@ -1088,12 +1135,16 @@ mod tests {
         let mut north = false;
         let mut l2 = false;
         let mut r2 = false;
+        let mut l3 = false;
+        let mut r3 = false;
         apply_js(
             &mut pressed,
             &mut west,
             &mut north,
             &mut l2,
             &mut r2,
+            &mut l3,
+            &mut r3,
             Profile::Xbox,
             JsEvent {
                 time: 0,
@@ -1108,6 +1159,8 @@ mod tests {
             &mut north,
             &mut l2,
             &mut r2,
+            &mut l3,
+            &mut r3,
             Profile::Xbox,
             JsEvent {
                 time: 0,

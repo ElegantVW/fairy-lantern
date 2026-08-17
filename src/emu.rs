@@ -92,6 +92,12 @@ impl Emu {
         self.rom_path.as_ref().map(|p| battery::state_path_for_rom(p))
     }
 
+    pub fn auto_state_path(&self) -> Option<PathBuf> {
+        self.rom_path
+            .as_ref()
+            .map(|p| battery::auto_state_path_for_rom(p))
+    }
+
     /// Step a few CPU cycles; returns true if a video frame completed.
     pub fn step_cycles(&mut self, min_cycles: u32) -> bool {
         let mut left = min_cycles.max(1);

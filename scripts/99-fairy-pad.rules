@@ -1,4 +1,6 @@
-# Battletron / fake Xbox 360 (045e:028e) — keep the node in group input.
-# Install: sudo cp scripts/99-fairy-pad.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+# Battletron / fake Xbox 360 (045e:028e) — input + usbfs + xpad LED in group input.
+# Install: sudo cp scripts/99-fairy-pad.rules /etc/udev/rules.d/ && sudo udevadm control --reload && replug
 SUBSYSTEM=="input", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="028e", MODE="0660", GROUP="input"
 SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="028e", MODE="0660", GROUP="input"
+# player-LED sysfs (not RGB). Needed for `fairy pad --led`.
+SUBSYSTEM=="leds", KERNEL=="xpad*", ACTION=="add", RUN+="/bin/chgrp input /sys/class/leds/%k/brightness", RUN+="/bin/chmod g+w /sys/class/leds/%k/brightness"

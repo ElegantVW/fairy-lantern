@@ -180,8 +180,6 @@ pub const HOST_RATE: u32 = 48_000;
 /// Game-rate → HOST_RATE linear pull resampler. Stereo frames. Underrun holds.
 #[derive(Debug, Default)]
 pub struct PullResampler {
-    prev_l: i16,
-    prev_r: i16,
     next_l: i16,
     next_r: i16,
     frac: f64,
@@ -194,33 +192,38 @@ impl PullResampler {
     }
 
     /// Fill interleaved stereo `out` at HOST_RATE from `ring` at `src_rate`.
+    ///
+    /// Zero-order hold (GBA DAC): each FIFO byte stays put until the next
+    /// pop. Linear lerp between 8-bit stairs overshoots and sounds clippy.
+    ///
+    /// The consume ratio is exact (`src/48k`). Tying it to ring depth
+    /// frequency-modulated the song: the play loop fills at ~59.7 Hz, this
+    /// thread samples depth every 20 ms (50 Hz), and the alias is a ~10 Hz
+    /// pump — tremolo on the intro, not just in fights.
     pub fn fill(&mut self, ring: &SampleRing, src_rate: u32, out: &mut [i16]) {
-        let src = src_rate.max(1) as f64;
-        let step = src / HOST_RATE as f64;
+        let step = src_rate.max(1) as f64 / HOST_RATE as f64;
+        let Ok(mut q) = ring.inner.lock() else {
+            for d in out.iter_mut() {
+                *d = 0;
+            }
+            return;
+        };
         let mut i = 0;
         while i + 1 < out.len() {
             self.frac += step;
             while self.frac >= 1.0 {
                 self.frac -= 1.0;
-                self.prev_l = self.next_l;
-                self.prev_r = self.next_r;
-                if let Some((l, r)) = ring.pop_frame() {
+                if let Some(l) = q.pop_front() {
+                    let r = q.pop_front().unwrap_or(l);
                     self.next_l = l;
                     self.next_r = r;
                     self.empty = 0;
                 } else {
                     self.empty = self.empty.saturating_add(1);
-                    // Hold-last-sample is what sounded like a loop. Silence.
-                    self.next_l = 0;
-                    self.next_r = 0;
-                    self.prev_l = 0;
-                    self.prev_r = 0;
                 }
             }
-            let t = self.frac.clamp(0.0, 1.0);
-            out[i] = (self.prev_l as f64 + (self.next_l as f64 - self.prev_l as f64) * t) as i16;
-            out[i + 1] =
-                (self.prev_r as f64 + (self.next_r as f64 - self.prev_r as f64) * t) as i16;
+            out[i] = self.next_l;
+            out[i + 1] = self.next_r;
             i += 2;
         }
     }
@@ -275,6 +278,42 @@ mod tests {
         assert_eq!(dst.len(), n_dst * 2);
         let peak = dst.iter().map(|s| s.abs()).max().unwrap();
         assert!(peak > 100, "resampled signal should not be silent peak={peak}");
+    }
+
+    #[test]
+    fn zoh_holds_plateau() {
+        let ring = SampleRing::new();
+        // Two frames, far apart in value. ZOH must not invent a mid-point.
+        ring.push_batch(&[10_000, 10_000, -10_000, -10_000]);
+        let mut dst = vec![0i16; 64];
+        let mut rs = PullResampler::new();
+        rs.fill(&ring, 8_000, &mut dst);
+        let mid = dst.iter().any(|&s| s.abs() > 100 && s.abs() < 8_000);
+        assert!(!mid, "linear lerp would invent in-between samples");
+        assert!(dst.iter().any(|&s| s == 10_000 || s == -10_000));
+    }
+
+    #[test]
+    fn exact_ratio_consumes_one_second() {
+        let ring = SampleRing::new();
+        let src_rate = 13378u32;
+        let mut src = Vec::with_capacity(src_rate as usize * 2);
+        for i in 0..src_rate as usize {
+            let v = (i as i16 % 200) + 100;
+            src.push(v);
+            src.push(v);
+        }
+        ring.push_batch(&src);
+        let before = ring.frames();
+        let mut dst = vec![0i16; HOST_RATE as usize * 2];
+        let mut rs = PullResampler::new();
+        rs.fill(&ring, src_rate, &mut dst);
+        let used = before - ring.frames();
+        // Exact src/48k — not the old ±4 % depth wobble.
+        assert!(
+            (used as i32 - src_rate as i32).abs() <= 2,
+            "used={used} want ~{src_rate}"
+        );
     }
 }
 

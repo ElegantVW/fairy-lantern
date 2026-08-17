@@ -67,7 +67,8 @@ impl Fifo {
         }
     }
 
-    /// Pop one sample when the selected timer ticks. Underrun → silence (no sticky hold).
+    /// Pop one sample when the selected timer ticks.
+    /// Empty FIFO keeps the last DAC byte (hardware sample-and-hold).
     pub fn pop_timer(&mut self) {
         match self.samples.pop_front() {
             Some(s) => {
@@ -76,8 +77,7 @@ impl Fifo {
                 self.samples_consumed = self.samples_consumed.wrapping_add(1);
             }
             None => {
-                self.hold = 0;
-                self.hold_valid = false;
+                self.dma_req = true;
             }
         }
         if self.samples.len() < 16 {
@@ -140,15 +140,16 @@ mod tests {
     }
 
     #[test]
-    fn underrun_silence() {
+    fn underrun_holds_last() {
         let mut f = Fifo::new();
         f.push_half(0x7F7F);
         f.pop_timer();
         assert!(f.hold_valid);
+        let last = f.hold;
         f.pop_timer();
         f.pop_timer();
-        assert!(!f.hold_valid);
-        assert_eq!(f.hold, 0);
+        assert!(f.hold_valid, "DAC holds the last byte");
+        assert_eq!(f.hold, last);
     }
 
     #[test]

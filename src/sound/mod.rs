@@ -2,8 +2,10 @@
 //!
 //! Phase A design:
 //! - Dual-rate FIFO pops from Timer 0/1 (SOUNDCNT_H bits 10/14).
-//! - One output sample per FIFO sample-timer tick at the game rate;
-//! - Host resamples to 48 kHz and opens `aplay`/`pw-cat` once. Underrun holds.
+//! - One output sample per FIFO sample-timer tick at the game rate
+//!   (~13379 Hz on BPRE), not 32768 Hz PWM.
+//! - Host zero-order-holds to 48 kHz and opens `aplay`/`pw-cat` once.
+//!   Consume ratio is exact; underrun holds the last frame. No mix HPF.
 
 
 mod fifo;
@@ -329,7 +331,7 @@ impl Sound {
         timer1_ctrl: u16,
         overflows: [u32; 4],
     ) {
-        let batch = self.mix.step(
+        self.mix.step(
             cycles,
             regs,
             timer_reload,
@@ -352,10 +354,11 @@ impl Sound {
             }
         }
 
+        let batch = self.mix.last_batch();
         if !batch.is_empty() {
-            self.capture.push_batch(&batch);
+            self.capture.push_batch(batch);
             if self.emit_host {
-                self.ring.push_batch(&batch);
+                self.ring.push_batch(batch);
             }
         }
     }
