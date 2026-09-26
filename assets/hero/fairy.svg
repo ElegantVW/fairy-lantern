@@ -8,6 +8,6 @@
 <text x="360" y="206" fill="#E8C070"> |   | </text>
 <text x="360" y="236" fill="#E8C070">  \_/  </text>
 </g>
-<text x="360" y="322" fill="#F0E4EE" font-family="Fraunces, Georgia, serif" font-size="36" text-anchor="middle">Fairy Lantern</text>
+<text x="360" y="322" fill="#F0E4EE" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" font-size="30" font-weight="bold" text-anchor="middle">Fairy Lantern</text>
 <text x="360" y="352" fill="#6B6FA8" font-family="DejaVu Sans Mono, monospace" font-size="16" text-anchor="middle">from-scratch GBA emulator</text>
 </svg>
