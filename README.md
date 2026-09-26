@@ -6,6 +6,22 @@ Rust: own ARM7TDMI core, bus, PPU, and sound path. No mGBA, no libretro cores.
 Source-only repo (no prebuilt programs or ROMs in git). Independent of the
 faeOS monorepo — plug in with one install command (see below).
 
+## Look
+
+![SPARK demo — single Mode-3 pixel, actual size](assets/screenshots/fairy-spark.png)
+
+The built-in SPARK ROM draws one pixel and waits for keys, so this is the
+whole demo (shown actual size). Game shots need a user cart — none in git.
+
+```
+   _   
+  /_\  
+ |   | 
+ | * | 
+ |   | 
+  \_/  
+```
+
 Accuracy notes: [docs/AUDIT.md](docs/AUDIT.md).  
 Listenable-audio restore point: `git checkout sacred/sound-working`.
 
