@@ -1,6 +1,6 @@
 ![Fairy Lantern hero](assets/hero/fairy.svg)
 
-# Fairy Lantern — GBA emulator from scratch
+# Fairy Lantern — GBA emulator from scratch 🏮
 
 Light a fable; play a pocket world. A from-scratch Game Boy Advance emulator in
 Rust: own ARM7TDMI core, bus, PPU, and sound path. No mGBA, no libretro cores.
