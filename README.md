@@ -1,3 +1,5 @@
+![Fairy Lantern hero](assets/hero/fairy.svg)
+
 # Fairy Lantern — GBA emulator from scratch
 
 Light a fable; play a pocket world. A from-scratch Game Boy Advance emulator in

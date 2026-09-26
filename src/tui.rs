@@ -274,6 +274,16 @@ fn draw(items: &[Item], sel: usize, flash: &str) -> String {
     let mut lines = Vec::new();
     lines.push("╭─ ✦ Fairy Lantern ✦ home ✦ ─────────────────────────────────╮".into());
     lines.push("│ light a fable · play a pocket world                        │".into());
+    for sig in [
+        "   _   ",
+        "  /_\\  ",
+        " |   | ",
+        " | * | ",
+        " |   | ",
+        "  \\_/  ",
+    ] {
+        lines.push(format!("│{}│", pad_fit(&format!("{:^60}", sig), 60)));
+    }
     if !flash.is_empty() {
         lines.push(format!("│ {}│", pad_fit(flash, 60)));
     } else {
