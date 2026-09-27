@@ -193,23 +193,38 @@ mod tests {
         Bus::new(&cart, None)
     }
 
+    /// Needs a user-supplied ROM and savestate, which cannot be committed.
+    ///
+    /// This used to hardcode an absolute path into one machine's home
+    /// directory and `return` early when the files were absent. That made it
+    /// a test that passed without asserting anything on every machine except
+    /// the one it was written on -- including CI -- while still being counted
+    /// in the headline test total. It is `#[ignore]`d now so `cargo test`
+    /// reports it as ignored instead of pretending. Run it with:
+    ///
+    ///     FAIRY_ROM=/path/to/game.gba FAIRY_STATE=/path/to/fight.flst \
+    ///         cargo test -- --ignored fight_savestate_hp_bar_row_is_lit
     #[test]
+    #[ignore = "requires FAIRY_ROM and FAIRY_STATE pointing at a user-supplied ROM + savestate"]
     fn fight_savestate_hp_bar_row_is_lit() {
-        let rom = std::path::Path::new(
-            "/home/evenweaker/.local/share/faeos/fairy-lantern/roms/Pokemon Liquid Crystal (v3.3.00512).gba",
+        let rom = match std::env::var_os("FAIRY_ROM") {
+            Some(v) => std::path::PathBuf::from(v),
+            None => panic!("FAIRY_ROM not set; see the ignore reason on this test"),
+        };
+        let st = match std::env::var_os("FAIRY_STATE") {
+            Some(v) => std::path::PathBuf::from(v),
+            None => panic!("FAIRY_STATE not set; see the ignore reason on this test"),
+        };
+        assert!(rom.is_file(), "FAIRY_ROM does not point at a file: {:?}", rom);
+        assert!(st.is_file(), "FAIRY_STATE does not point at a file: {:?}", st);
+        let mut emu = crate::emu::Emu::from_path(&rom, None).expect("load ROM");
+        crate::savestate::load(&mut emu, &st).expect("load fight state");
+        assert!(
+            !emu.bus.pal.iter().all(|&b| b == 0),
+            "savestate palette is entirely black -- the live slot was overwritten \
+             (e.g. a black summary screen) and is not a fight fixture. Point \
+             FAIRY_STATE at a real fight state."
         );
-        let st = std::path::Path::new(
-            "/home/evenweaker/.local/share/faeos/fairy-lantern/states/Pokemon Liquid Crystal (v3.3.00512).flst",
-        );
-        if !rom.exists() || !st.exists() {
-            return;
-        }
-        let mut emu = crate::emu::Emu::from_path(rom, None).expect("load LC ROM");
-        crate::savestate::load(&mut emu, st).expect("load fight state");
-        if emu.bus.pal.iter().all(|&b| b == 0) {
-            // Live slot was overwritten (e.g. black summary). Not a fight fixture.
-            return;
-        }
         render::render_scanline(&emu.bus, 89, &mut emu.ppu.frame);
         let px = emu.ppu.frame[89 * WIDTH + 160];
         assert_ne!(
