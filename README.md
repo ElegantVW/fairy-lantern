@@ -19,6 +19,14 @@ For: emulator readers and headless `run --frames` checks. Not for: full compatib
 The built-in SPARK ROM draws one pixel and waits for keys, so this is the
 whole demo (shown actual size). Game shots need a user cart — none in git.
 
+Verify without a screen (user-supplied cart only):
+
+```
+cargo test
+./target/release/fairy run --frames 450 /path/to/game.gba
+# writes /tmp/fairy-lantern-audio.wav (48 kHz stereo) + /tmp/fairy-lantern-last.ppm
+```
+
 ```
    _   
   /_\  
