@@ -8,6 +8,10 @@ Rust: own ARM7TDMI core, bus, PPU, and sound path. No mGBA, no libretro cores.
 Source-only repo (no prebuilt programs or ROMs in git). Independent of the
 faeOS monorepo — plug in with one install command (see below).
 
+Status: v0.11 boots specific carts to overworld/fight with saves. Not mGBA-class — holes in `docs/AUDIT.md`. ROMs user-supplied only.
+
+For: emulator readers and headless `run --frames` checks. Not for: full compatibility, commercial ROMs in git.
+
 ## Look
 
 ![SPARK demo — single Mode-3 pixel, actual size](assets/screenshots/fairy-spark.png)
